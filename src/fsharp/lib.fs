@@ -178,14 +178,11 @@ module ListAssoc =
 //------------------------------------------------------------------------
 
 module ListSet = 
-    (* NOTE: O(n)! *)
-    let rec contains f x l = 
-        match l with 
-        | [] -> false
-        | x'::t -> f x x' || contains f x t
+    let inline contains f x l = List.exists (f x) l
 
     (* NOTE: O(n)! *)
     let insert f x l = if contains f x l then l else x::l
+
     let unionFavourRight f l1 l2 = 
         match l1, l2 with 
         | _, [] -> l1
@@ -233,10 +230,6 @@ module ListSet =
     // Note: if duplicates appear, keep the ones toward the _front_ of the list
     let setify f l = List.foldBack (insert f) (List.rev l) [] |> List.rev
 
-
-module FlatListSet = 
-    let remove f x l = FlatList.filter (fun y -> not (f x y)) l
-
 //-------------------------------------------------------------------------
 // Library: pairs
 //------------------------------------------------------------------------
@@ -268,9 +261,7 @@ let fmap2Of2 f z (a1,a2)       = let z,a2 = f z a2 in z,(a1,a2)
 module List = 
     let noRepeats xOrder xs =
         let s = Zset.addList   xs (Zset.empty xOrder) // build set 
-        Zset.elements s          // get elements... no repeats 
-
-    let groupBy f (xs:list<'T>) =  xs |> Seq.groupBy f |> Seq.map (map2Of2 Seq.toList) |> Seq.toList
+        Zset.elements s          // get elements... no repeats
 
 //---------------------------------------------------------------------------
 // Zmap rebinds
@@ -310,18 +301,18 @@ let equalOn f x y = (f x) = (f y)
 
 let bufs f = 
     let buf = System.Text.StringBuilder 100 
-    f buf; 
+    f buf 
     buf.ToString()
 
 let buff (os: TextWriter) f x = 
     let buf = System.Text.StringBuilder 100 
-    f buf x; 
+    f buf x 
     os.Write(buf.ToString())
 
 // Converts "\n" into System.Environment.NewLine before writing to os. See lib.fs:buff
 let writeViaBufferWithEnvironmentNewLines (os: TextWriter) f x = 
     let buf = System.Text.StringBuilder 100 
-    f buf x;
+    f buf x
     let text = buf.ToString()
     let text = text.Replace("\n",System.Environment.NewLine)
     os.Write text
@@ -375,14 +366,14 @@ let nullableSlotFull x = x
 // Caches, mainly for free variables
 //---------------------------------------------------------------------------
 
-type cache<'T> = { mutable cacheVal: 'T NonNullSlot; }
+type cache<'T> = { mutable cacheVal: 'T NonNullSlot }
 let newCache() = { cacheVal = nullableSlotEmpty() }
 
 let inline cached cache resf = 
     match box cache.cacheVal with 
     | null -> 
         let res = resf() 
-        cache.cacheVal <- nullableSlotFull res; 
+        cache.cacheVal <- nullableSlotFull res 
         res
     | _ -> 
         cache.cacheVal
@@ -392,7 +383,7 @@ let inline cacheOptRef cache f =
     | Some v -> v
     | None -> 
        let res = f()
-       cache := Some res;
+       cache := Some res
        res 
 
 
@@ -419,11 +410,11 @@ let delayInsertedToWorkaroundKnownNgenBug s f =
     (* Some random code to prevent inlining of this function *)
     let res = ref 10
     for i = 0 to 2 do 
-       res := !res + String.length s;
-    done;
-    if verbose then printf "------------------------executing NGEN bug delay '%s', calling 'f' --------------\n" s;
+       res := !res + String.length s
+    done
+    if verbose then printf "------------------------executing NGEN bug delay '%s', calling 'f' --------------\n" s
     let res = f()
-    if verbose then printf "------------------------exiting NGEN bug delay '%s' --------------\n" s;
+    if verbose then printf "------------------------exiting NGEN bug delay '%s' --------------\n" s
     res
     
 
@@ -475,7 +466,7 @@ module internal AsyncUtil =
                     if result.IsSome then  
                         []
                     else
-                        result <- Some res;
+                        result <- Some res
                         // Invoke continuations in FIFO order
                         // Continuations that Async.FromContinuations provide do QUWI/SynchContext.Post,
                         // so the order is not overly relevant but still.                        

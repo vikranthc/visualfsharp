@@ -559,34 +559,13 @@ type UsingMSBuild() as this =
 
     [<Test>]
     [<Category("fsx closure")>]
-    // 'mscorcfg' is loaded from the GAC _and_ it is available on XP and above.
+    // 'CustomMarshalers' is loaded from the GAC _and_ it is available on XP and above.
     member public this.``Fsx.NoError.HashR.ResolveFromGAC``() =  
         let fileContent = """
             #light
-            #r "mscorcfg"
+            #r "CustomMarshalers"
             """
         this.VerifyFSXNoErrorList(fileContent)
-
-    [<Test>]
-    [<Category("fsx closure")>]
-
-    // 'Microsoft.VisualStudio.QualityTools.Common.dll' is resolved via AssemblyFoldersEx over recent VS releases
-    member public this.``Fsx.NoError.HashR.ResolveFromAssemblyFoldersEx``() =  
-        let fileContent = """
-            #light
-            #r "Microsoft.VisualStudio.QualityTools.Common.dll"
-            """
-        this.VerifyFSXNoErrorList(fileContent)
-
-    [<Test>]
-    [<Category("fsx closure")>]
-    // Can be any assembly that is in AssemblyFolders but not AssemblyFoldersEx
-    member public this.``Fsx.NoError.HashR.ResolveFromAssemblyFolders``() = 
-        let fileContent = """
-            #light
-            #r "Microsoft.SqlServer.SString"
-            """
-        this.VerifyFSXNoErrorList(fileContent) 
 
     [<Test>]
     [<Category("fsx closure")>]
@@ -974,27 +953,9 @@ type UsingMSBuild() as this =
     [<Category("fsx closure")>]
     member public this.``Fsx.HashR_QuickInfo.ResolveFromGAC``() = 
         this.AssertQuickInfoContainsAtEndOfMarkerInFsxFile
-            """#r "mscorcfg" """        // 'mscorcfg' is loaded from the GAC _and_ it is available on XP and above.
-            "#r \"mscor" "Global Assembly Cache"
+            """#r "CustomMarshalers" """        // 'mscorcfg' is loaded from the GAC _and_ it is available on XP and above.
+            "#r \"Custo" ".NET Framework"
 
-    // // Disabled because it seems Microsoft.VisualStudio.QualityTools.Common.dll is no longer always available on CI installs in the same way
-    // // as it used to be.
-    // [<Test;Category("fsx closure"); Category("NO_CI")>] 
-    // member public this.``Fsx.HashR_QuickInfo.ResolveFromAssemblyFoldersEx``() = 
-    //     let fileContent = """#r "Microsoft.VisualStudio.QualityTools.Common.dll" """     // 'Microsoft.VisualStudio.QualityTools.Common.dll' is located via AssemblyFoldersEx
-    //     let marker = "#r \"Microsoft.Vis"
-    //     this.AssertQuickInfoContainsAtEndOfMarkerInFsxFile fileContent marker "Microsoft.VisualStudio.QualityTools.Common, Version="
-    //     this.AssertQuickInfoContainsAtEndOfMarkerInFsxFile fileContent marker "Microsoft.VisualStudio.QualityTools.Common.dll"
-
-    // // Disabled because it seems Microsoft.SqlServer.SString.dll is no longer always available on CI installs in the same way
-    //[<Test>]
-    //[<Category("fsx closure")>]
-    //member public this.``Fsx.HashR_QuickInfo.ResolveFromAssemblyFolders``() =
-    //    let fileContent = """#r "Microsoft.SqlServer.SString" """       // Can be any assembly that is in AssemblyFolders but not AssemblyFoldersEx
-    //    let marker = "#r \"Microsoft.SqlSe"
-    //    this.AssertQuickInfoContainsAtEndOfMarkerInFsxFile fileContent marker "Microsoft.SqlServer.SString.dll"
-    //    this.AssertQuickInfoContainsAtEndOfMarkerInFsxFile fileContent marker "Found by AssemblyFolders registry key"
-        
     [<Test>]
     [<Category("fsx closure")>]
     member public this.``Fsx.HashR_QuickInfo.ResolveFromFullyQualifiedPath``() = 
@@ -1003,7 +964,7 @@ type UsingMSBuild() as this =
         let fileContent = "#r @\"" + fullyqualifiepathtoddll + "\""
         let marker = "#r @\"" + fullyqualifiepathtoddll.Substring(0,fullyqualifiepathtoddll.Length/2)       // somewhere in the middle of the string
         this.AssertQuickInfoContainsAtEndOfMarkerInFsxFile fileContent marker expectedtooltip
-        this.AssertQuickInfoNotContainsAtEndOfMarkerInFsxFile fileContent marker ".dll"
+        //this.AssertQuickInfoNotContainsAtEndOfMarkerInFsxFile fileContent marker ".dll"
 
     [<Test>]
     member public this.``Fsx.InvalidHashReference.ShouldBeASquiggle.Bug3012``() =  
@@ -1237,8 +1198,6 @@ type UsingMSBuild() as this =
         Assert.AreEqual(Path.Combine(projectFolder,"File1.fsx"), fas.ProjectFileNames.[0])
         Assert.AreEqual(1, fas.ProjectFileNames.Length)
 
-#if OPEN_BUILD
-#else
 
     /// FEATURE: #reference against a strong name should work.
     [<Test>]
@@ -1246,7 +1205,7 @@ type UsingMSBuild() as this =
         let code =
                                             ["#light"
 #if FX_ATLEAST_40                                            
-                                             sprintf "#reference \"System.Core, Version=%s, Culture=neutral, PublicKeyToken=b77a5c561934e089\"" Microsoft.BuildSettings.Version.OfAssembly
+                                             sprintf "#reference \"System.Core, Version=%s, Culture=neutral, PublicKeyToken=b77a5c561934e089\"" (System.Environment.Version.ToString())
 #else
                                              "#reference \"System.Core, Version=3.5.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089\""
 #endif                                             
@@ -1255,7 +1214,7 @@ type UsingMSBuild() as this =
         MoveCursorToEndOfMarker(file,"open System.") 
         let completions = AutoCompleteAtCursor file
         AssertCompListContains(completions,"Linq")   
-#endif
+
 
     /// Try out some bogus file names in #r, #I and #load.
     [<Test>]
@@ -1379,24 +1338,30 @@ type UsingMSBuild() as this =
         let fsVersion =
 #if VS_VERSION_DEV12
             "4.3.1.0"
-#else
+#endif
 #if VS_VERSION_DEV14
             "4.4.0.0"
-#else
+#endif
+#if VS_VERSION_DEV15
             "4.4.1.0"
 #endif
-#endif
+        let binariesFolder = match Internal.Utilities.FSharpEnvironment.BinFolderOfDefaultFSharpCompiler with
+                             | Some(x) -> x
+                             | None -> failwith "Location of binaries folder cannot be found"
+
         PlaceIntoProjectFileBeforeImport
             (project, sprintf @"
                 <ItemGroup>
                     <!-- Subtle: You need this reference to compile but not to get language service -->
                     <Reference Include=""FSharp.Compiler.Interactive.Settings, Version=%s, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a"">
                         <SpecificVersion>True</SpecificVersion>
+                        <HintPath>%s\\FSharp.Compiler.Interactive.Settings.dll</HintPath>
                     </Reference>
                     <Reference Include=""FSharp.Compiler, Version=%s, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a"">
                         <SpecificVersion>True</SpecificVersion>
+                        <HintPath>%s\\FSharp.Compiler.dll</HintPath>
                     </Reference>
-                </ItemGroup>" fsVersion fsVersion)
+                </ItemGroup>" fsVersion binariesFolder fsVersion binariesFolder)
 
         let fsx = AddFileFromTextEx(project,"Script.fsx","Script.fsx",BuildAction.Compile,
                                       ["let x = fsi.CommandLineArgs"])

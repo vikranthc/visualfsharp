@@ -374,6 +374,7 @@ check "32o8f43kaI: Spawn"
      result) 1
 
 
+#if !Portable
 module FromBeginEndTests = 
     // FromBeginEnd 
     let FromBeginEndTest() = 
@@ -452,7 +453,7 @@ module FromBeginEndTests =
                      expectedResult
 
     FromBeginEndTest()
-
+#endif
 module Bug6078 =
     open System
     
@@ -475,6 +476,7 @@ module Bug6078 =
                 "foo"
     Test()
 
+#if !Portable
 module AwaitEventTests = 
     let AwaitEventTest() = 
         // AwaitEvent
@@ -525,7 +527,7 @@ module AwaitEventTests =
 
 
     AwaitEventTest()
-
+#endif
 
 module AsBeginEndTests = 
 
@@ -1844,6 +1846,8 @@ module CheckNoPumpingBecauseWeTrampolineSynchronousCode =
                 Application.Exit() } 
              |> Async.StartImmediate)
 
+    form.WindowState <- FormWindowState.Minimized
+    form.ShowInTaskbar <- false
     Application.Run form             
     // Set the synchronization context back to its original value
     System.Threading.SynchronizationContext.SetSynchronizationContext(null);

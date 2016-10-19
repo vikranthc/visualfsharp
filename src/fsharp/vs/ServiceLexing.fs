@@ -18,7 +18,6 @@ open Microsoft.FSharp.Compiler.Ast
 open Microsoft.FSharp.Compiler.ErrorLogger
 open Microsoft.FSharp.Compiler.Lexhelp
 open Microsoft.FSharp.Compiler.Lib
-open Internal.Utilities.Debug
 
 type Position = int * int
 type Range = Position * Position
@@ -88,9 +87,7 @@ type FSharpTokenColorKind =
     | PreprocessorKeyword = 8
     | Number = 9
     | Operator = 10
-#if COLORIZE_TYPES
     | TypeName = 11
-#endif
 
 /// Categorize an action the editor should take in response to a token, e.g. brace matching
 /// 
@@ -250,7 +247,7 @@ module internal TokenClassifications =
         | FINALLY   | LAZY   | MATCH  | MUTABLE   | NEW   | OF    | OPEN   | OR | VOID | EXTERN
         | INTERFACE | REC   | TO   | TRUE   | TRY   | TYPE   |  VAL   | INLINE   | WHEN  | WHILE   | WITH
         | IF | THEN  | ELSE | DO | DONE | LET(_) | IN (*| NAMESPACE*) | CONST
-        | HIGH_PRECEDENCE_PAREN_APP
+        | HIGH_PRECEDENCE_PAREN_APP | FIXED
         | HIGH_PRECEDENCE_BRACK_APP
         | TYPE_COMING_SOON | TYPE_IS_HERE | MODULE_COMING_SOON | MODULE_IS_HERE
           -> (FSharpTokenColorKind.Keyword,FSharpTokenCharKind.Keyword,FSharpTokenTriggerClass.None)
@@ -476,7 +473,7 @@ type SingleLineTokenState =
 [<Sealed>]
 type FSharpLineTokenizer(lexbuf: UnicodeLexing.Lexbuf, 
                             maxLength: int option,
-                            filename : string, 
+                            filename : Option<string>, 
                             lexArgsLightOn : lexargs,
                             lexArgsLightOff : lexargs
                             ) = 
@@ -484,7 +481,9 @@ type FSharpLineTokenizer(lexbuf: UnicodeLexing.Lexbuf,
     let skip = false   // don't skip whitespace in the lexer 
     
     let mutable singleLineTokenState = SingleLineTokenState.BeforeHash
-    let fsx = CompileOps.IsScript(filename)
+    let fsx = match filename with
+              | None -> false
+              | Some(value) -> CompileOps.IsScript(value)
 
     // ----------------------------------------------------------------------------------
     // This implements post-processing of #directive tokens - not very elegant, but it works...
@@ -551,8 +550,10 @@ type FSharpLineTokenizer(lexbuf: UnicodeLexing.Lexbuf,
           
 
 
-    do resetLexbufPos filename lexbuf 
-    
+    do match filename with 
+        | None -> lexbuf.EndPos <- Internal.Utilities.Text.Lexing.Position.Empty
+        | Some(value) -> resetLexbufPos value lexbuf
+     
     member x.ScanToken(lexintInitial) : Option<FSharpTokenInfo> * FSharpTokenizerLexState = 
         use unwindBP = PushThreadBuildPhaseUntilUnwind (BuildPhase.Parse)
         use unwindEL = PushErrorLoggerPhaseUntilUnwind (fun _ -> DiscardErrorsLogger)
@@ -649,9 +650,7 @@ type FSharpLineTokenizer(lexbuf: UnicodeLexing.Lexbuf,
             | EOF lexcont -> 
                 // End of text! No more tokens.
                 None,lexcont,0 
-            | LEX_FAILURE s -> 
-                // REVIEW: report this error
-                Trace.PrintLine("Lexing", fun _ -> sprintf "LEX_FAILURE:%s\n" s)
+            | LEX_FAILURE _ -> 
                 None, LexerStateEncoding.revertToDefaultLexCont, 0
             | _ ->
                 // Get the information about the token
@@ -735,7 +734,7 @@ type FSharpLineTokenizer(lexbuf: UnicodeLexing.Lexbuf,
         LexerStateEncoding.encodeLexCont colorState ncomments position ifdefStack light
 
 [<Sealed>]
-type FSharpSourceTokenizer(defineConstants : string list, filename : string) =     
+type FSharpSourceTokenizer(defineConstants : string list, filename : Option<string>) =     
     let lexResourceManager = new Lexhelp.LexResourceManager() 
 
     let lexArgsLightOn = mkLexargs(filename,defineConstants,LightSyntaxStatus(true,false),lexResourceManager, ref [],DiscardErrorsLogger) 

@@ -14,7 +14,6 @@ open Microsoft.VisualStudio.Shell
 open Microsoft.VisualStudio.Shell.Interop
 open Microsoft.VisualStudio.TextManager.Interop
 open Microsoft.VisualStudio.OLE.Interop
-open Microsoft.Build.BuildEngine
 open System.Diagnostics
 open Microsoft.Build.Execution
 open Microsoft.Build.Framework
@@ -1375,6 +1374,7 @@ module internal VsMocks =
     let vsTargetFrameworkAssemblies35 = vsTargetFrameworkAssembliesN 0x30005u
     let vsTargetFrameworkAssemblies40 = vsTargetFrameworkAssembliesN 0x40000u
     let vsTargetFrameworkAssemblies45 = vsTargetFrameworkAssembliesN 0x40005u
+    let vsTargetFrameworkAssemblies46 = vsTargetFrameworkAssembliesN 0x40006u
     
     let vsFrameworkMultiTargeting =
         { new IVsFrameworkMultiTargeting with
@@ -1565,6 +1565,11 @@ module internal VsMocks =
         sp.AddService(typeof<SVsTargetFrameworkAssemblies>, box vsTargetFrameworkAssemblies45, false)
         sp.AddService(typeof<SVsFrameworkMultiTargeting>, box vsFrameworkMultiTargeting, false)
         sp, ccn
+    let MakeMockServiceProviderAndConfigChangeNotifier46() =
+        let sp, ccn = MakeMockServiceProviderAndConfigChangeNotifierNoTargetFrameworkAssembliesService()
+        sp.AddService(typeof<SVsTargetFrameworkAssemblies>, box vsTargetFrameworkAssemblies46, false)
+        sp.AddService(typeof<SVsFrameworkMultiTargeting>, box vsFrameworkMultiTargeting, false)
+        sp, ccn
 
     // This is the mock thing that all tests, except the multitargeting tests call.
     // By default, let it use the 4.0 assembly version.
@@ -1594,22 +1599,26 @@ module internal VsActual =
     // Since the editor exports MEF components, we can use those components directly from unit tests without having to load too many heavy
     // VS assemblies.  Use editor MEF components directly from the VS product.
 
+    open System.IO
     open System.ComponentModel.Composition.Hosting
     open System.ComponentModel.Composition.Primitives
     open Microsoft.VisualStudio.Text
 
     let vsInstallDir =
+        // use the environment variable to find the VS installdir
 #if VS_VERSION_DEV12
-        let key = @"SOFTWARE\Microsoft\VisualStudio\12.0"
-#else
-        let key = @"SOFTWARE\Microsoft\VisualStudio\14.0"
+        let vsvar = System.Environment.GetEnvironmentVariable("VS120COMNTOOLS")
 #endif
-        let hklm = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry32)
-        let rkey = hklm.OpenSubKey(key)
-        rkey.GetValue("InstallDir") :?> string
+#if VS_VERSION_DEV14
+        let vsvar = System.Environment.GetEnvironmentVariable("VS140COMNTOOLS")
+#endif
+#if VS_VERSION_DEV15
+        let vsvar = System.Environment.GetEnvironmentVariable("VS150COMNTOOLS")
+#endif
+        Path.Combine(vsvar, "..")
 
     let CreateEditorCatalog() =
-        let root = vsInstallDir + @"\CommonExtensions\Microsoft\Editor"
+        let root = Path.Combine(vsInstallDir, @"IDE\CommonExtensions\Microsoft\Editor")
         let CreateAssemblyCatalog(root, file) =
             let fullPath = System.IO.Path.Combine(root, file)
             if System.IO.File.Exists(fullPath) then
@@ -1617,16 +1626,6 @@ module internal VsActual =
             else
                 failwith("could not find " + fullPath)
 
-        // copy this private assembly next to unit tests, otherwise assembly loader cannot find it
-        let neededLocalAssem = vsInstallDir + @"\PrivateAssemblies\Microsoft.VisualStudio.Platform.VSEditor.Interop.dll"
-#if NUNIT_2
-        let curDir = System.IO.Path.GetDirectoryName((new System.Uri(System.Reflection.Assembly.Load("nunit.util").EscapedCodeBase)).LocalPath)
-#else
-        let curDir = System.IO.Path.GetDirectoryName((new System.Uri(System.Reflection.Assembly.Load("nunit.framework").EscapedCodeBase)).LocalPath)
-#endif
-        let localCopy = System.IO.Path.Combine(curDir, System.IO.Path.GetFileName(neededLocalAssem))
-        System.IO.File.Copy(neededLocalAssem, localCopy, true)
-        
         let list = new ResizeArray<ComposablePartCatalog>()
         list.Add(CreateAssemblyCatalog(root, "Microsoft.VisualStudio.Platform.VSEditor.dll"))
 

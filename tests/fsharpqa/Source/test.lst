@@ -18,16 +18,15 @@ CodeGen01,NoMT,CodeGen				CodeGen\EmittedIL\MethodImplAttribute
 CodeGen01,NoMT,CodeGen				CodeGen\EmittedIL\Misc
 CodeGen01,NoMT,CodeGen				CodeGen\EmittedIL\Mutation
 CodeGen01,NoMT,CodeGen				CodeGen\EmittedIL\Operators
-CodeGen01,NoMT,CodeGen				CodeGen\EmittedIL\QueryExpressionStepping
-CodeGen01,NoMT,CodeGen				CodeGen\EmittedIL\SeqExpressionStepping
+Retry,CodeGen01,NoMT,CodeGen				CodeGen\EmittedIL\QueryExpressionStepping
+Retry,CodeGen01,NoMT,CodeGen				CodeGen\EmittedIL\SeqExpressionStepping
 CodeGen01,NoMT,CodeGen				CodeGen\EmittedIL\SeqExpressionTailCalls
 CodeGen01,NoMT,CodeGen,NoHostedCompiler,SerializableAttribute				CodeGen\EmittedIL\SerializableAttribute
 CodeGen01,NoMT,CodeGen				CodeGen\EmittedIL\StaticInit
-CodeGen01,NoMT,CodeGen				CodeGen\EmittedIL\SteppingMatch
+Retry,CodeGen01,NoMT,CodeGen				CodeGen\EmittedIL\SteppingMatch
 CodeGen01,NoMT,CodeGen				CodeGen\EmittedIL\TailCalls
 CodeGen01,NoMT,CodeGen				CodeGen\EmittedIL\TestFunctions
 CodeGen01,NoMT,CodeGen				CodeGen\EmittedIL\Tuples
-NoHostedCompiler,CodeGen01,NoMT,EmittedIL_TypeProviders		CodeGen\EmittedIL\TypeProviders
 CodeGen01,NoMT,CodeGen				CodeGen\StringEncoding
 CodeGen01,NoMT,CodeGen				CodeGen\Structure
 
@@ -47,7 +46,7 @@ CompilerOptions01,NoMT				CompilerOptions\fsc\noframework
 CompilerOptions01,NoMT				CompilerOptions\fsc\nologo
 CompilerOptions01,NoMT				CompilerOptions\fsc\optimize
 CompilerOptions01,NoMT				CompilerOptions\fsc\out
-CompilerOptions01,NoMT				CompilerOptions\fsc\pdb
+CompilerOptions01,NoMT,pdbs				CompilerOptions\fsc\pdb
 CompilerOptions01,NoMT				CompilerOptions\fsc\platform
 CompilerOptions01,NoMT				CompilerOptions\fsc\reference
 CompilerOptions01,NoMT				CompilerOptions\fsc\Removed
@@ -224,6 +223,7 @@ Conformance08			Conformance\PatternMatching\Wildcard
 Conformance08			Conformance\Signatures\SignatureConformance
 Conformance08			Conformance\Signatures\SignatureTypes
 Conformance08			Conformance\SpecialAttributesAndTypes\Imported\System.ThreadStatic
+Conformance08			Conformance\SpecialAttributesAndTypes\Imported\CallerInfo
 Conformance08			Conformance\TypesAndTypeConstraints\CheckingSyntacticTypes
 Conformance08			Conformance\TypesAndTypeConstraints\LogicalPropertiesOfTypes
 Conformance08			Conformance\TypesAndTypeConstraints\TypeConstraints
@@ -238,33 +238,11 @@ Conformance08			Conformance\UnitsOfMeasure\Parsing
 Conformance08			Conformance\UnitsOfMeasure\TypeChecker
 Conformance08			Conformance\UnitsOfMeasure\WithOOP
 
-
-NoHostedCompiler,TypeProviders01			TypeProviders\Arrays
-NoHostedCompiler,TypeProviders01			TypeProviders\Attributes
-NoHostedCompiler,TypeProviders03			TypeProviders\Events
-NoHostedCompiler,TypeProviders03			TypeProviders\Fields\Literals
-NoHostedCompiler,TypeProviders03			TypeProviders\Generics
-NoHostedCompiler,TypeProviders03			TypeProviders\Inheritance
-NoHostedCompiler,TypeProviders03			TypeProviders\Interfaces\Erased
-NoHostedCompiler,TypeProviders03			..\..\..\testsprivate\fsharpqa\Source\TypeProviders\Linq101Samples
-NoHostedCompiler,TypeProviders03			TypeProviders\Methods
-NoHostedCompiler,TypeProviders03			..\..\..\testsprivate\fsharpqa\Source\TypeProviders\Misc
-NoHostedCompiler,TypeProviders03			TypeProviders\Namespaces
-
-NoHostedCompiler,TypeProviders04			TypeProviders\Properties\Instance
-NoHostedCompiler,TypeProviders04			TypeProviders\Properties\Static
-NoHostedCompiler,TypeProviders04			..\..\..\testsprivate\fsharpqa\Source\TypeProviders\QuerySql2DotNetTypes
-NoHostedCompiler,TypeProviders04			TypeProviders\RuntimeDesignTimeAssembly\LoadingLogic
-NoHostedCompiler,TypeProviders04			TypeProviders\RuntimeDesignTimeAssembly\Negative
-NoHostedCompiler,TypeProviders04			TypeProviders\StaticParams
-NoHostedCompiler,TypeProviders04			..\..\..\testsprivate\fsharpqa\Source\TypeProviders\WsdlDotNetTypes
-
-
 Misc01			ClrFx\PseudoCustomAttributes\AssemblyAlgorithmId
 Misc01			ClrFx\PseudoCustomAttributes\AssemblyConfiguration
 Misc01			ClrFx\PseudoCustomAttributes\AssemblyVersion
 Misc01			Diagnostics\async
-Misc01			Diagnostics\General
+Misc01,Diagnostics			Diagnostics\General
 Misc01			Diagnostics\NONTERM
 Misc01			Diagnostics\ParsingAtEOF
 Misc01			EntryPoint
@@ -280,6 +258,9 @@ Misc01			Libraries\Core\NativeInterop\stackalloc
 Misc01			Libraries\Core\Operators
 Misc01			Libraries\Core\Reflection
 Misc01			Libraries\Core\Unchecked
+Misc01			Warnings
+Misc01			ErrorMessages\NameResolution
+Misc01			ErrorMessages\UnitGenericAbstractType
 
 Misc02			Libraries\Portable
 Misc02			Misc
@@ -297,4 +278,3 @@ Misc02			Stress
 Misc02			XmlDoc\Basic
 Misc02			XmlDoc\OCamlDoc
 Misc02			XmlDoc\UnitOfMeasure
-Diagnostics		Diagnostics\General

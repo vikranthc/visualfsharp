@@ -160,6 +160,8 @@ this file.
               DefineConstants="$(DefineConstants)"
               DisabledWarnings="$(NoWarn)"
               DocumentationFile="$(DocumentationFile)"
+              EmbedAllSources="$(EmbedAllSources)"
+              Embed="$(Embed)"
               GenerateInterfaceFile="$(GenerateInterfaceFile)"
               KeyFile="$(KeyOriginatorFile)"
               LCID="$(LCID)"
@@ -173,6 +175,7 @@ this file.
               References="@(ReferencePath)"
               ReferencePath="$(ReferencePath)"
               Resources="@(_CoreCompileResourceInputs);@(CompiledLicenseFile);@(AdditionalEmbeddedResource)"
+              SourceLink="$(SourceLink)"
               Sources="@(CompileBefore);@(Compile);@(CompileAfter)"
               Tailcalls="$(Tailcalls)"
               TargetType="$(OutputType)"
@@ -189,7 +192,7 @@ this file.
               SubsystemVersion="$(SubsystemVersion)"
               HighEntropyVA="$(HighEntropyVA)"
               TargetProfile="$(TargetProfile)"
-              SqmSessionGuid="$(SqmSessionGuid)"
+              DotnetFscCompilerPath="$(DotnetFscCompilerPath)"
         />
 
         <ItemGroup>
@@ -201,14 +204,15 @@ this file.
 
     <Import Project="$(MSBuildBinPath)\Microsoft.Common.targets"/>
 
-  <!--
-      ============================================================
-                                          GenerateTargetFrameworkMonikerAttribute
+        <!--
+            ============================================================
+            GenerateTargetFrameworkMonikerAttribute
 
-      Emit the target framework moniker attribute as  a code fragment into a temporary source file for the compiler.
+            Emit the target framework moniker attribute as  a code 
+            fragment into a temporary source file for the compiler.
 
-      ============================================================
-      -->
+            ============================================================
+        -->
 
     <Target Name="GenerateTargetFrameworkMonikerAttribute" BeforeTargets="BeforeCompile" DependsOnTargets="PrepareForBuild;GetReferenceAssemblyPaths" Inputs="$(MSBuildThisFileFullPath)" Outputs="$(TargetFrameworkMonikerAssemblyAttributesPath)" Condition="'$(GenerateTargetFrameworkAttribute)' == 'true'">
 

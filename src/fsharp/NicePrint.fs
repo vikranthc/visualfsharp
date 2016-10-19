@@ -6,15 +6,13 @@
 
 module internal Microsoft.FSharp.Compiler.NicePrint
 
-#nowarn "44" // This construct is deprecated. please use List.item
-
 open Internal.Utilities
 open Microsoft.FSharp.Compiler.AbstractIL 
+open Microsoft.FSharp.Compiler.AbstractIL.Diagnostics
 open Microsoft.FSharp.Compiler.AbstractIL.IL 
 open Microsoft.FSharp.Compiler.AbstractIL.Internal 
 open Microsoft.FSharp.Compiler.AbstractIL.Internal.Library
 open Microsoft.FSharp.Compiler 
-open Microsoft.FSharp.Compiler.AbstractIL.Diagnostics
 open Microsoft.FSharp.Compiler.Range
 open Microsoft.FSharp.Compiler.Rational
 open Microsoft.FSharp.Compiler.Ast
@@ -23,17 +21,20 @@ open Microsoft.FSharp.Compiler.Tast
 open Microsoft.FSharp.Compiler.Tastops
 open Microsoft.FSharp.Compiler.Tastops.DebugPrint
 open Microsoft.FSharp.Compiler.TcGlobals
-open Microsoft.FSharp.Compiler.AbstractIL.IL (* Abstract IL  *)
 open Microsoft.FSharp.Compiler.Lib
 open Microsoft.FSharp.Compiler.Infos
+open Microsoft.FSharp.Compiler.InfoReader
+open Microsoft.FSharp.Compiler.AttributeChecking
+open Microsoft.FSharp.Compiler.Layout
+open Microsoft.FSharp.Compiler.PrettyNaming
+
 open Microsoft.FSharp.Core.Printf
+
 #if EXTENSIONTYPING
 open Microsoft.FSharp.Compiler.ExtensionTyping
 open Microsoft.FSharp.Core.CompilerServices
 #endif
 
-open Microsoft.FSharp.Compiler.Layout
-open Microsoft.FSharp.Compiler.PrettyNaming
 
 [<AutoOpen>]
 module internal PrintUtilities = 
@@ -57,7 +58,7 @@ module internal PrintUtilities =
 
     let applyMaxMembers maxMembers (alldecls : _ list) = 
         match maxMembers with 
-        | Some n when alldecls.Length > n -> (alldecls |> Seq.truncate n |> Seq.toList) @ [wordL "..."] 
+        | Some n when alldecls.Length > n -> (alldecls |> List.truncate n) @ [wordL "..."] 
         | _ -> alldecls
 
     /// fix up a name coming from IL metadata by quoting "funny" names (keywords, otherwise invalid identifiers)
@@ -181,11 +182,11 @@ module private PrintIL =
         | ILType.Void               -> wordL "unit" // These are type-theoretically totally different type-theoretically `void` is Fin 0 and `unit` is Fin (S 0) ... but, this looks like as close as we can get.
         | ILType.Array (sh, t)      -> layoutILType denv ilTyparSubst t ^^ layoutILArrayShape sh
         | ILType.Value t
-        | ILType.Boxed t            -> layoutILTypeRef denv t.TypeRef ^^ (t.GenericArgs |> ILList.toList |> List.map (layoutILType denv ilTyparSubst) |> paramsL)
+        | ILType.Boxed t            -> layoutILTypeRef denv t.TypeRef ^^ (t.GenericArgs |> List.map (layoutILType denv ilTyparSubst) |> paramsL)
         | ILType.Ptr t
         | ILType.Byref t            -> layoutILType denv ilTyparSubst t
         | ILType.FunctionPointer t  -> layoutILCallingSignature denv ilTyparSubst None t
-        | ILType.TypeVar n            -> List.nth ilTyparSubst (int n)
+        | ILType.TypeVar n          -> List.item (int n) ilTyparSubst
         | ILType.Modified (_, _, t) -> layoutILType denv ilTyparSubst t // Just recurse through them to the contained ILType
 
     /// Layout a function pointer signature using type-only-F#-style. No argument names are printed.
@@ -194,7 +195,7 @@ module private PrintIL =
         // constructors (Their return types are reported as `void`, but this is
         // incorrect; so if we're dealing with a constructor we require that the
         // return type be passed along as the `cons` parameter.)
-        let args = signatur.ArgTypes |> ILList.toList |> List.map (layoutILType denv ilTyparSubst) 
+        let args = signatur.ArgTypes |> List.map (layoutILType denv ilTyparSubst) 
         let res  = 
             match cons with
             | Some className -> layoutILTypeRefName denv (SplitNamesForILPath (ungenericizeTypeName className)) ^^ (pruneParms className ilTyparSubst |> paramsL) // special case for constructor return-type (viz., the class itself)
@@ -232,7 +233,7 @@ module private PrintIL =
             match cons with
             | Some className -> layoutILTypeRefName denv (SplitNamesForILPath (ungenericizeTypeName className)) ^^ (pruneParms className ilTyparSubst |> paramsL) // special case for constructor return-type (viz., the class itself)
             | None           -> retType |> layoutILType denv ilTyparSubst
-        match parameters |> ILList.toList  with
+        match parameters with
         | []   -> wordL "unit" ^^ wordL "->" ^^ res
         | [x]  -> layoutILParameter denv ilTyparSubst x ^^ wordL "->" ^^ res
         | args    -> sepListL (wordL "*") (List.map (layoutILParameter denv ilTyparSubst) args) ^^ wordL "->" ^^ res
@@ -283,14 +284,14 @@ module private PrintIL =
         let nameL   = wordL name 
             
         let layoutGetterType (getterRef:ILMethodRef) =
-            if ILList.isEmpty getterRef.ArgTypes then
+            if List.isEmpty getterRef.ArgTypes then
                 layoutILType denv ilTyparSubst getterRef.ReturnType
             else
                 layoutILCallingSignature denv ilTyparSubst None getterRef.CallingSignature
                 
         let layoutSetterType (setterRef:ILMethodRef) =
-            let argTypes = setterRef.ArgTypes |> ILList.toList 
-            if isNil argTypes then
+            let argTypes = setterRef.ArgTypes
+            if List.isEmpty argTypes then
                 emptyL // shouldn't happen
             else
                 let frontArgs, lastArg = List.frontAndBack argTypes
@@ -515,8 +516,6 @@ module private PrintIL =
                 | m :: _ -> layoutILCallingSignature denv ilTyparSubst None m.CallingSignature
                 | _      -> comment "`Invoke` method could not be found"
             wordL "delegate" ^^ wordL "of" ^^ rhs
-
-        | ILTypeDefKind.Other _   -> comment "cannot show type"
           
     and layoutILNestedClassDef (denv: DisplayEnv) (typeDef : ILTypeDef) =
         let name     = adjustILName typeDef.Name
@@ -911,8 +910,11 @@ module private PrintTypes =
           layoutTypeAppWithInfoAndPrec denv env (layoutTyconRef denv tc) prec tc.IsPrefixDisplay args 
 
         // Layout a tuple type 
-        | TType_tuple t ->
-            bracketIfL (prec <= 2) (layoutTypesWithInfoAndPrec denv env 2 (wordL "*") t)
+        | TType_tuple (tupInfo,t)  ->
+            if evalTupInfoIsStruct tupInfo then 
+                wordL "struct" --- bracketL (layoutTypesWithInfoAndPrec denv env 2 (wordL "*") t)
+            else 
+                bracketIfL (prec <= 2) (layoutTypesWithInfoAndPrec denv env 2 (wordL "*") t)
 
         // Layout a first-class generic type. 
         | TType_forall (tps,tau) ->
@@ -1001,7 +1003,7 @@ module private PrintTypes =
         | _ -> 
             let tpcsL = layoutConstraintsWithInfo denv env tpcs
             let coreL = sepListL (sepL ",") (List.map (layoutTyparRefWithInfo denv env) typars)
-            (if prefix || nonNil(tpcs) then nmL ^^ angleL (coreL --- tpcsL) else bracketL coreL --- nmL)
+            (if prefix || not (List.isEmpty tpcs) then nmL ^^ angleL (coreL --- tpcsL) else bracketL coreL --- nmL)
 
 
     let layoutTyparConstraint denv typars = 
@@ -1036,7 +1038,7 @@ module private PrintTypes =
             PrettyTypes.NewPrettyTypars memberToParentInst methTypars methTyparNames
 
         let retTy = instType allTyparInst retTy
-        let argInfos = argInfos |> List.map (fun infos -> if isNil infos then [(denv.g.unit_ty,ValReprInfo.unnamedTopArg1)] else infos |> List.map (map1Of2 (instType allTyparInst))) 
+        let argInfos = argInfos |> List.map (fun infos -> if List.isEmpty infos then [(denv.g.unit_ty,ValReprInfo.unnamedTopArg1)] else infos |> List.map (map1Of2 (instType allTyparInst))) 
 
         // Also format dummy types corresponding to any type variables on the container to make sure they 
         // aren't chosen as names for displayed variables. 
@@ -1103,7 +1105,7 @@ module private PrintTastMemberOrVals =
             stat ++ newL ^^ wordL ":" ^^ tauL
         | MemberKind.PropertyGetSet -> stat
         | MemberKind.PropertyGet -> 
-            if isNil argInfos then 
+            if List.isEmpty argInfos then 
                 // use error recovery because intellisense on an incomplete file will show this
                 errorR(Error(FSComp.SR.tastInvalidFormForPropertyGetter(),v.Id.idRange));
                 stat --- wordL v.PropertyName --- wordL "with get"
@@ -1115,15 +1117,15 @@ module private PrintTastMemberOrVals =
 
                 let niceMethodTypars,tauL = layoutMemberType denv v argInfos rty
                 let nameL = mkNameL niceMethodTypars v.PropertyName
-                stat --- (nameL ^^ wordL ":" ^^ (if isNil argInfos then tauL else tauL --- wordL "with get"))
+                stat --- (nameL ^^ wordL ":" ^^ (if List.isEmpty argInfos then tauL else tauL --- wordL "with get"))
         | MemberKind.PropertySet -> 
-            if argInfos.Length <> 1 || isNil argInfos.Head then 
+            if argInfos.Length <> 1 || List.isEmpty argInfos.Head then 
                 // use error recovery because intellisense on an incomplete file will show this
                 errorR(Error(FSComp.SR.tastInvalidFormForPropertySetter(),v.Id.idRange));
                 stat --- wordL v.PropertyName --- wordL "with set"
             else 
                 let argInfos,valueInfo = List.frontAndBack argInfos.Head
-                let niceMethodTypars,tauL = layoutMemberType denv v (if isNil argInfos then [] else [argInfos]) (fst valueInfo)
+                let niceMethodTypars,tauL = layoutMemberType denv v (if List.isEmpty argInfos then [] else [argInfos]) (fst valueInfo)
                 let nameL = mkNameL niceMethodTypars v.PropertyName
                 stat --- (nameL ^^ wordL ":" ^^ (tauL --- wordL "with set"))
 
@@ -1194,7 +1196,7 @@ module InfoMemberPrinting =
     /// Format the arguments of a method to a buffer. 
     ///
     /// This uses somewhat "old fashioned" printf-style buffer printing.
-    let formatParamDataToBuffer denv os (ParamData(isParamArray, _isOutArg, optArgInfo, nmOpt, _reflArgInfo, pty)) =
+    let formatParamDataToBuffer denv os (ParamData(isParamArray, _isOutArg, optArgInfo, _callerInfoInfo, nmOpt, _reflArgInfo, pty)) =
         let isOptArg = optArgInfo.IsOptional
         match isParamArray, nmOpt, isOptArg, tryDestOptionTy denv.g pty with 
         // Layout an optional argument 
@@ -1382,11 +1384,11 @@ module private TastDefinitionPrinting =
     /// When repn is class or datatype constructors (not single one).
     let breakTypeDefnEqn repr =
         match repr with 
-        | TFsObjModelRepr _ -> true
-        | TFiniteUnionRepr r    -> r.CasesTable.UnionCasesAsList.Length > 1
+        | TFSharpObjectRepr _ -> true
+        | TUnionRepr r    -> r.CasesTable.UnionCasesAsList.Length > 1
         | TRecdRepr _ -> true
         | TAsmRepr _ 
-        | TILObjModelRepr _  
+        | TILObjectRepr _  
         | TMeasureableRepr _ 
 #if EXTENSIONTYPING
         | TProvidedTypeExtensionPoint _
@@ -1448,8 +1450,8 @@ module private TastDefinitionPrinting =
             match valRef with
             | None -> true
             | Some(vr) ->
-                (denv.showObsoleteMembers || not (Infos.AttributeChecking.CheckFSharpAttributesForObsolete denv.g vr.Attribs)) &&
-                (denv.showHiddenMembers || not (Infos.AttributeChecking.CheckFSharpAttributesForHidden denv.g vr.Attribs))
+                (denv.showObsoleteMembers || not (CheckFSharpAttributesForObsolete denv.g vr.Attribs)) &&
+                (denv.showHiddenMembers || not (CheckFSharpAttributesForHidden denv.g vr.Attribs))
 
         let ctors =
             GetIntrinsicConstructorInfosOfType infoReader m ty
@@ -1582,8 +1584,8 @@ module private TastDefinitionPrinting =
                                       // Don't print individual methods forming interface implementations - these are currently never exported 
                                       not (isInterfaceTy denv.g oty)
                                   | [] -> true)
-              |> List.filter (fun v -> denv.showObsoleteMembers || not (Infos.AttributeChecking.CheckFSharpAttributesForObsolete denv.g v.Attribs))
-              |> List.filter (fun v -> denv.showHiddenMembers || not (Infos.AttributeChecking.CheckFSharpAttributesForHidden denv.g v.Attribs))
+              |> List.filter (fun v -> denv.showObsoleteMembers || not (CheckFSharpAttributesForObsolete denv.g v.Attribs))
+              |> List.filter (fun v -> denv.showHiddenMembers || not (CheckFSharpAttributesForHidden denv.g v.Attribs))
           // sort 
           let sortKey (v:ValRef) = (not v.IsConstructor,    // constructors before others 
                                     v.Id.idText,            // sort by name 
@@ -1593,7 +1595,7 @@ module private TastDefinitionPrinting =
           let adhoc = adhoc |> List.sortBy sortKey
           let iimpls = 
               match tycon.TypeReprInfo with 
-              | TFsObjModelRepr r when (match r.fsobjmodel_kind with TTyconInterface -> true | _ -> false) -> []
+              | TFSharpObjectRepr r when (match r.fsobjmodel_kind with TTyconInterface -> true | _ -> false) -> []
               | _ -> tycon.ImmediateInterfacesOfFSharpTycon
           let iimpls = iimpls |> List.filter (fun (_,compgen,_) -> not compgen)
           // if TTyconInterface, the iimpls should be printed as inherited interfaces 
@@ -1604,7 +1606,7 @@ module private TastDefinitionPrinting =
           iimplsLs,adhocCtorsLs,adhocInstanceLs,adhocStaticLs
       let memberLs = memberImplementLs @ memberCtorLs @ memberInstanceLs @ memberStaticLs
       let addMembersAsWithEnd reprL = 
-          if isNil memberLs then reprL
+          if List.isEmpty memberLs then reprL
           elif simplified then reprL @@ aboveListL memberLs
           else reprL @@ (wordL "with" @@-- aboveListL memberLs) @@ wordL "end"
 
@@ -1612,12 +1614,12 @@ module private TastDefinitionPrinting =
           let repr = tycon.TypeReprInfo
           match repr with 
           | TRecdRepr _ 
-          | TFiniteUnionRepr _  
-          | TFsObjModelRepr _ 
+          | TUnionRepr _  
+          | TFSharpObjectRepr _ 
           | TAsmRepr _         
           | TMeasureableRepr _
-          | TILObjModelRepr _ -> 
-              let brk  = nonNil memberLs || breakTypeDefnEqn repr
+          | TILObjectRepr _ -> 
+              let brk  = not (List.isEmpty memberLs) || breakTypeDefnEqn repr
               let rhsL =                     
                   let addReprAccessL l = layoutAccessibility denv tycon.TypeReprAccessibility l 
                   let denv = denv.AddAccessibility tycon.TypeReprAccessibility 
@@ -1627,7 +1629,7 @@ module private TastDefinitionPrinting =
                       let recdL = tycon.TrueFieldsAsList |> List.map recdFieldRefL |> applyMaxMembers denv.maxMembers |> aboveListL |> braceL
                       Some (addMembersAsWithEnd (addReprAccessL recdL))
                         
-                  | TFsObjModelRepr r -> 
+                  | TFSharpObjectRepr r -> 
                       match r.fsobjmodel_kind with 
                       | TTyconDelegate (TSlotSig(_,_, _,_,paraml, rty)) ->
                           let rty = GetFSharpViewOfReturnType denv.g rty
@@ -1653,7 +1655,7 @@ module private TastDefinitionPrinting =
                                   | _ -> []
                               let vsprs = 
                                   tycon.MembersOfFSharpTyconSorted
-                                  |> List.filter (fun v -> isNil (Option.get v.MemberInfo).ImplementedSlotSigs) 
+                                  |> List.filter (fun v -> List.isEmpty (Option.get v.MemberInfo).ImplementedSlotSigs) 
                                   |> List.filter (fun v -> v.IsDispatchSlot)
                                   |> List.map (fun vref -> PrintTastMemberOrVals.layoutValOrMember denv vref.Deref)
                               let staticValsLs  = 
@@ -1669,23 +1671,23 @@ module private TastDefinitionPrinting =
                                   None
                               else
                                   let alldecls = applyMaxMembers denv.maxMembers alldecls
-                                  let emptyMeasure = match tycon.TypeOrMeasureKind with TyparKind.Measure -> isNil alldecls | _ -> false
+                                  let emptyMeasure = match tycon.TypeOrMeasureKind with TyparKind.Measure -> List.isEmpty alldecls | _ -> false
                                   if emptyMeasure then None else 
                                   let declsL = aboveListL alldecls
                                   let declsL = match start with Some s -> (wordL s @@-- declsL) @@ wordL "end" | None -> declsL
                                   Some declsL
-                  | TFiniteUnionRepr _        -> 
+                  | TUnionRepr _        -> 
                       let layoutUnionCases = tycon.UnionCasesAsList |> layoutUnionCases denv |> applyMaxMembers denv.maxMembers |> aboveListL
                       Some (addMembersAsWithEnd (addReprAccessL layoutUnionCases))
                   | TAsmRepr _                      -> 
                       Some (wordL "(# \"<Common IL Type Omitted>\" #)")
                   | TMeasureableRepr ty                 ->
                       Some (layoutType denv ty)
-                  | TILObjModelRepr (_,_,td) -> 
+                  | TILObjectRepr (_,_,td) -> 
                       Some (PrintIL.layoutILTypeDef denv td)
                   | _  -> None
 
-              let brk  = match tycon.TypeReprInfo with | TILObjModelRepr _ -> true | _  -> brk
+              let brk  = match tycon.TypeReprInfo with | TILObjectRepr _ -> true | _  -> brk
               match rhsL with 
               | None  -> lhsL
               | Some rhsL -> 
@@ -1742,8 +1744,8 @@ module private InferredSigPrinting =
 
         let rec isConcreteNamespace x = 
             match x with 
-            | TMDefRec(tycons,binds,mbinds,_) -> 
-                nonNil tycons || not (FlatList.isEmpty binds) || (mbinds |> List.exists (fun (ModuleOrNamespaceBinding(x,_)) -> not x.IsNamespace))
+            | TMDefRec(_,tycons,mbinds,_) -> 
+                not (List.isEmpty tycons) || (mbinds |> List.exists (function ModuleOrNamespaceBinding.Binding _ -> true | ModuleOrNamespaceBinding.Module(x,_) -> not x.IsNamespace))
             | TMDefLet _  -> true
             | TMDefDo _  -> true
             | TMDefs defs -> defs |> List.exists isConcreteNamespace 
@@ -1756,19 +1758,19 @@ module private InferredSigPrinting =
         and imdefsL denv  x = aboveListL (x |> List.map (imdefL denv))
 
         and imdefL denv  x = 
-            let filterVal    (v:Val) = not v.IsCompilerGenerated && isNone v.MemberInfo
+            let filterVal    (v:Val) = not v.IsCompilerGenerated && Option.isNone v.MemberInfo
             let filterExtMem (v:Val) = v.IsExtensionMember
             match x with 
-            | TMDefRec(tycons,binds,mbinds,_) -> 
+            | TMDefRec(_,tycons,mbinds,_) -> 
                   TastDefinitionPrinting.layoutTyconDefns denv infoReader ad m tycons @@ 
-                  (binds |> valsOfBinds |> List.filter filterExtMem |> TastDefinitionPrinting.layoutExtensionMembers denv) @@
-                  (binds |> valsOfBinds |> List.filter filterVal    |> List.map (PrintTastMemberOrVals.layoutValOrMember denv)   |> aboveListL) @@
-                  (mbinds |> List.map (imbindL denv) |> aboveListL)
+                  (mbinds |> List.choose (function ModuleOrNamespaceBinding.Binding bind -> Some bind | _ -> None) |> valsOfBinds |> List.filter filterExtMem |> TastDefinitionPrinting.layoutExtensionMembers denv) @@
+                  (mbinds |> List.choose (function ModuleOrNamespaceBinding.Binding bind -> Some bind | _ -> None) |> valsOfBinds |> List.filter filterVal    |> List.map (PrintTastMemberOrVals.layoutValOrMember denv)   |> aboveListL) @@
+                  (mbinds |> List.choose (function ModuleOrNamespaceBinding.Module (mspec,def) -> Some (mspec,def) | _ -> None) |> List.map (imbindL denv) |> aboveListL)
             | TMDefLet(bind,_) -> ([bind.Var] |> List.filter filterVal    |> List.map (PrintTastMemberOrVals.layoutValOrMember denv) |> aboveListL)
             | TMDefs defs -> imdefsL denv defs
             | TMDefDo _  -> emptyL
             | TMAbstract mexpr -> imexprLP denv mexpr
-        and imbindL denv  (ModuleOrNamespaceBinding(mspec, def)) = 
+        and imbindL denv  (mspec, def) = 
             let nm =  mspec.DemangledModuleOrNamespaceName
             let innerPath = (fullCompPathOfModuleOrNamespace mspec).AccessPath
             let outerPath = mspec.CompilationPath.AccessPath
@@ -1795,7 +1797,7 @@ module private InferredSigPrinting =
                     if showHeader then 
                         // OK, we're not in F# Interactive
                         // Check if this is an outer module with no namespace
-                        if isNil outerPath then 
+                        if List.isEmpty outerPath then 
                             // If so print a "module" declaration
                             (wordL "module" ^^ nmL) @@ basic
                         else 
@@ -1834,13 +1836,13 @@ module private PrintData =
             elif denv.g.unionCaseRefEq c denv.g.cons_ucref then 
                 let rec strip = function (Expr.Op (TOp.UnionCase _,_,[h;t],_)) -> h::strip t | _ -> []
                 listL (dataExprL denv) (strip expr)
-            elif isNil(args) then 
+            elif List.isEmpty args then 
                 wordL c.CaseName 
             else 
                 (wordL c.CaseName ++ bracketL (commaListL (dataExprsL denv args)))
             
         | Expr.Op (TOp.ExnConstr(c),_,args,_)           ->  (wordL c.LogicalName ++ bracketL (commaListL (dataExprsL denv args)))
-        | Expr.Op (TOp.Tuple,_,xs,_)                  -> tupleL (dataExprsL denv xs)
+        | Expr.Op (TOp.Tuple _,_,xs,_)                  -> tupleL (dataExprsL denv xs)
         | Expr.Op (TOp.Recd (_,tc),_,xs,_) -> 
             let fields = tc.TrueInstanceFieldsAsList
             let lay fs x = (wordL fs.rfield_id.idText ^^ sepL "=") --- (dataExprL denv x)

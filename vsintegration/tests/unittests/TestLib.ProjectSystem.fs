@@ -9,7 +9,6 @@ open System.Runtime.Serialization
 open System.Collections.Generic
 open System.Text.RegularExpressions
 open System.Diagnostics
-open Internal.Utilities.Debug
 open System.IO
 open System.Text
 open System.Xml.Linq
@@ -17,10 +16,10 @@ open Salsa
 
 open Microsoft.Win32
 
+open Microsoft.VisualStudio
 open Microsoft.VisualStudio.FSharp.ProjectSystem
 open Microsoft.VisualStudio.Shell.Interop
 
-open Microsoft.Build.BuildEngine
 open Microsoft.Build.Execution
 open Microsoft.Build.Framework
         
@@ -314,6 +313,7 @@ type TheTests() =
             File.AppendAllText(file, TheTests.FsprojTextWithProjectReferencesAndOtherFlags(compileItems, references, [], null, other, targetFramework))
             let sp, cnn = 
                 match targetFramework with
+                | "v4.6" -> VsMocks.MakeMockServiceProviderAndConfigChangeNotifier46()
                 | "v4.5" -> VsMocks.MakeMockServiceProviderAndConfigChangeNotifier45()
                 | "v4.0" -> VsMocks.MakeMockServiceProviderAndConfigChangeNotifier40()
                 | "v3.5" -> VsMocks.MakeMockServiceProviderAndConfigChangeNotifier35()

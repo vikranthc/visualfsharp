@@ -3,8 +3,6 @@
 /// Functions to import .NET binary metadata as TAST objects
 module internal Microsoft.FSharp.Compiler.Import
 
-#nowarn "44" // This construct is deprecated. please use List.item
-
 open System.Reflection
 open System.Collections.Generic
 open Internal.Utilities
@@ -160,17 +158,17 @@ let rec ImportILType (env:ImportMap) m tinst typ =
 
     | ILType.Boxed  tspec | ILType.Value tspec ->
         let tcref = ImportILTypeRef env m tspec.TypeRef 
-        let inst = tspec.GenericArgs |> ILList.toList |> List.map (ImportILType env m tinst) 
+        let inst = tspec.GenericArgs |> List.map (ImportILType env m tinst) 
         ImportTyconRefApp env tcref inst
 
     | ILType.Byref ty -> mkByrefTy env.g (ImportILType env m tinst ty)
-    | ILType.Ptr ty  -> mkNativePtrType env.g (ImportILType env m tinst ty)
+    | ILType.Ptr ty  -> mkNativePtrTy env.g (ImportILType env m tinst ty)
     | ILType.FunctionPointer _ -> env.g.nativeint_ty (* failwith "cannot import this kind of type (ptr, fptr)" *)
     | ILType.Modified(_,_,ty) -> 
          // All custom modifiers are ignored
          ImportILType env m tinst ty
     | ILType.TypeVar u16 -> 
-         try List.nth tinst (int u16) 
+         try List.item (int u16) tinst
          with _ -> 
               error(Error(FSComp.SR.impNotEnoughTypeParamsInScopeWhileImporting(),m))
 
@@ -180,7 +178,7 @@ let rec CanImportILType (env:ImportMap) m typ =
     | ILType.Array(_bounds,ty) -> CanImportILType env m ty
     | ILType.Boxed  tspec | ILType.Value tspec ->
         CanImportILTypeRef env m tspec.TypeRef 
-        && tspec.GenericArgs |> ILList.toList |> List.forall (CanImportILType env m) 
+        && tspec.GenericArgs |> List.forall (CanImportILType env m) 
     | ILType.Byref ty -> CanImportILType env m ty
     | ILType.Ptr ty  -> CanImportILType env m ty
     | ILType.FunctionPointer _ -> true
@@ -246,7 +244,7 @@ let rec ImportProvidedType (env:ImportMap) (m:range) (* (tinst:TypeInst) *) (st:
         mkByrefTy g elemTy
     elif st.PUntaint((fun st -> st.IsPointer),m) then 
         let elemTy = (ImportProvidedType env m (* tinst *) (st.PApply((fun st -> st.GetElementType()),m)))
-        mkNativePtrType g elemTy
+        mkNativePtrTy g elemTy
     else
 
         // REVIEW: Extension type could try to be its own generic arg (or there could be a type loop)
@@ -279,16 +277,16 @@ let rec ImportProvidedType (env:ImportMap) (m:range) (* (tinst:TypeInst) *) (st:
                 if tp.Kind = TyparKind.Measure then  
                     let rec conv ty = 
                         match ty with 
-                        | TType_app (tcref,[t1;t2]) when tyconRefEq g tcref g.measureproduct_tcr -> MeasureProd (conv t1, conv t2)
-                        | TType_app (tcref,[t1]) when tyconRefEq g tcref g.measureinverse_tcr -> MeasureInv (conv t1)
-                        | TType_app (tcref,[]) when tyconRefEq g tcref g.measureone_tcr -> MeasureOne 
-                        | TType_app (tcref,[]) when tcref.TypeOrMeasureKind = TyparKind.Measure -> MeasureCon tcref
+                        | TType_app (tcref,[t1;t2]) when tyconRefEq g tcref g.measureproduct_tcr -> Measure.Prod (conv t1, conv t2)
+                        | TType_app (tcref,[t1]) when tyconRefEq g tcref g.measureinverse_tcr -> Measure.Inv (conv t1)
+                        | TType_app (tcref,[]) when tyconRefEq g tcref g.measureone_tcr -> Measure.One 
+                        | TType_app (tcref,[]) when tcref.TypeOrMeasureKind = TyparKind.Measure -> Measure.Con tcref
                         | TType_app (tcref,_) -> 
                             errorR(Error(FSComp.SR.impInvalidMeasureArgument1(tcref.CompiledName, tp.Name),m))
-                            MeasureOne
+                            Measure.One
                         | _ -> 
                             errorR(Error(FSComp.SR.impInvalidMeasureArgument2(tp.Name),m))
-                            MeasureOne
+                            Measure.One
 
                     TType_measure (conv genericArg)
                 else
@@ -389,7 +387,7 @@ let ImportILGenericParameters amap m scoref tinst (gps: ILGenericParameterDefs) 
         let tptys = tps |> List.map mkTyparTy
         let importInst = tinst@tptys
         (tps,gps) ||> List.iter2 (fun tp gp -> 
-            let constraints = gp.Constraints |> ILList.toList |> List.map (fun ilty -> TyparConstraint.CoercesTo(ImportILType amap m importInst (rescopeILType scoref ilty),m) )
+            let constraints = gp.Constraints |> List.map (fun ilty -> TyparConstraint.CoercesTo(ImportILType amap m importInst (rescopeILType scoref ilty),m) )
             let constraints = if gp.HasReferenceTypeConstraint then (TyparConstraint.IsReferenceType(m)::constraints) else constraints
             let constraints = if gp.HasNotNullableValueTypeConstraint then (TyparConstraint.IsNonNullableStruct(m)::constraints) else constraints
             let constraints = if gp.HasDefaultConstructorConstraint then (TyparConstraint.RequiresDefaultConstructor(m)::constraints) else constraints

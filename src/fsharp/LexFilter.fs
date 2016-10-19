@@ -534,7 +534,6 @@ type LexFilterImpl (lightSyntaxStatus:LightSyntaxStatus, compilingFsLib, lexer, 
         new LexbufState(lexbuf.StartPos, lexbuf.EndPos, lexbuf.IsPastEndOfStream)  
 
     let setLexbufState (p:LexbufState) =
-        // if debug then dprintf "SET lex state to; %a\n" output_any p;  
         lexbuf.StartPos <- p.StartPos  
         lexbuf.EndPos <- p.EndPos
         lexbuf.IsPastEndOfStream <- p.PastEOF
@@ -927,6 +926,7 @@ type LexFilterImpl (lightSyntaxStatus:LightSyntaxStatus, compilingFsLib, lexer, 
                     | MINUS 
                     | GLOBAL 
                     | CONST
+                    | KEYWORD_STRING _
                     | NULL
                     | INT8 _ | INT16 _ | INT32 _ | INT64 _ | NATIVEINT _ 
                     | UINT8 _ | UINT16 _ | UINT32 _ | UINT64 _ | UNATIVEINT _
@@ -1153,7 +1153,7 @@ type LexFilterImpl (lightSyntaxStatus:LightSyntaxStatus, compilingFsLib, lexer, 
         // Balancing rule. Every 'done' terminates all surrounding blocks up to a CtxtDo, and will be swallowed by 
         // terminating the corresponding CtxtDo in the rule below. 
         let tokenForcesHeadContextClosure token stack = 
-            nonNil stack &&
+            not (List.isEmpty stack) &&
             match token with 
             | Parser.EOF _ -> true
             | SEMICOLON_SEMICOLON  -> not (tokenBalancesHeadContext token stack) 
@@ -1316,10 +1316,7 @@ type LexFilterImpl (lightSyntaxStatus:LightSyntaxStatus, compilingFsLib, lexer, 
         //  Applied when a token other then a long identifier is seen 
         | _, (CtxtNamespaceHead (namespaceTokenPos, prevToken) :: _) -> 
             match prevToken, token with 
-            | NAMESPACE, GLOBAL when namespaceTokenPos.Column < tokenStartPos.Column -> 
-                replaceCtxt tokenTup (CtxtNamespaceHead (namespaceTokenPos, token))
-                returnToken tokenLexbufState token
-            | (NAMESPACE | DOT), IDENT _ when namespaceTokenPos.Column < tokenStartPos.Column -> 
+            | (NAMESPACE | DOT | REC | GLOBAL), (REC | IDENT _ | GLOBAL) when namespaceTokenPos.Column < tokenStartPos.Column -> 
                 replaceCtxt tokenTup (CtxtNamespaceHead (namespaceTokenPos, token))
                 returnToken tokenLexbufState token
             | IDENT _, DOT when namespaceTokenPos.Column < tokenStartPos.Column -> 
@@ -1348,7 +1345,7 @@ type LexFilterImpl (lightSyntaxStatus:LightSyntaxStatus, compilingFsLib, lexer, 
                 returnToken tokenLexbufState token
             | MODULE, (PUBLIC | PRIVATE | INTERNAL) when moduleTokenPos.Column < tokenStartPos.Column -> 
                 returnToken tokenLexbufState token
-            | (MODULE | DOT), IDENT _ when moduleTokenPos.Column < tokenStartPos.Column -> 
+            | (MODULE | DOT | REC), (REC | IDENT _) when moduleTokenPos.Column < tokenStartPos.Column -> 
                 replaceCtxt tokenTup (CtxtModuleHead (moduleTokenPos, token))
                 returnToken tokenLexbufState token
             | IDENT _, DOT when moduleTokenPos.Column < tokenStartPos.Column -> 

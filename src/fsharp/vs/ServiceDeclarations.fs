@@ -8,25 +8,29 @@
 namespace Microsoft.FSharp.Compiler.SourceCodeServices
 
 open System
+open System.Collections.Generic
 open System.IO
 open System.Text
-open System.Collections.Generic
+
 open Microsoft.FSharp.Core.Printf
 open Microsoft.FSharp.Compiler 
 open Microsoft.FSharp.Compiler.AbstractIL.IL 
 open Microsoft.FSharp.Compiler.AbstractIL.Internal.Library  
 open Microsoft.FSharp.Compiler.AbstractIL.Diagnostics 
-open Microsoft.FSharp.Compiler.PrettyNaming
-open Microsoft.FSharp.Compiler.TcGlobals 
-open Microsoft.FSharp.Compiler.Range
+
+open Microsoft.FSharp.Compiler.AccessibilityLogic
 open Microsoft.FSharp.Compiler.Ast
 open Microsoft.FSharp.Compiler.ErrorLogger
+open Microsoft.FSharp.Compiler.Layout
+open Microsoft.FSharp.Compiler.Lib
+open Microsoft.FSharp.Compiler.PrettyNaming
+open Microsoft.FSharp.Compiler.Range
 open Microsoft.FSharp.Compiler.Tast
 open Microsoft.FSharp.Compiler.Tastops
-open Microsoft.FSharp.Compiler.Lib
-open Microsoft.FSharp.Compiler.Layout
+open Microsoft.FSharp.Compiler.TcGlobals 
 open Microsoft.FSharp.Compiler.Infos
 open Microsoft.FSharp.Compiler.NameResolution
+open Microsoft.FSharp.Compiler.InfoReader
 open Microsoft.FSharp.Compiler.SourceCodeServices.ItemDescriptionIcons 
 
 module EnvMisc2 =
@@ -74,6 +78,7 @@ type FSharpToolTipText =
     | FSharpToolTipText of FSharpToolTipElement list  
 
 
+[<AutoOpen>]
 module internal ItemDescriptionsImpl = 
 
     let isFunction g typ =
@@ -658,7 +663,7 @@ module internal ItemDescriptionsImpl =
                     NicePrint.outputTyconRef denv os ucinfo.TyconRef
                     bprintf os ".%s: "  
                         (DecompileOpName uc.Id.idText) 
-                    if not (isNil recd) then
+                    if not (List.isEmpty recd) then
                         NicePrint.outputUnionCases denv os recd
                         os.Append (" -> ") |> ignore
                     NicePrint.outputTy denv os rty )
@@ -758,7 +763,7 @@ module internal ItemDescriptionsImpl =
         | Item.Property(_,pinfos) -> 
             let pinfo = pinfos.Head
             let rty = pinfo.GetPropertyType(amap,m) 
-            let rty = if pinfo.IsIndexer then mkTupledTy g (pinfo.GetParamTypes(amap, m)) --> rty else  rty 
+            let rty = if pinfo.IsIndexer then mkRefTupledTy g (pinfo.GetParamTypes(amap, m)) --> rty else  rty 
             let _, rty, _ = PrettyTypes.PrettifyTypes1 g rty
             let text =
                 bufs (fun os -> 
@@ -859,7 +864,7 @@ module internal ItemDescriptionsImpl =
                         | _ -> st) 
                     |> Seq.mapi (fun i x -> i,x) 
                     |> Seq.toList
-                if nonNil namesToAdd then 
+                if not (List.isEmpty namesToAdd) then 
                     bprintf os "\n"
                 for i, txt in namesToAdd do
                     bprintf os "\n%s" ((if i = 0 then FSComp.SR.typeInfoFromFirst else FSComp.SR.typeInfoFromNext) txt)
@@ -1123,9 +1128,9 @@ module internal ItemDescriptionsImpl =
     let GlyphOfItem(denv,d) = 
 
          /// Find the glyph for the given representation.    
-         let ReprToGlyph(repr) = 
+         let reprToGlyph repr = 
             match repr with
-            | TFsObjModelRepr om -> 
+            | TFSharpObjectRepr om -> 
                 match om.fsobjmodel_kind with 
                 | TTyconClass -> iIconGroupClass
                 | TTyconInterface -> iIconGroupInterface
@@ -1133,48 +1138,47 @@ module internal ItemDescriptionsImpl =
                 | TTyconDelegate _ -> iIconGroupDelegate
                 | TTyconEnum _ -> iIconGroupEnum
             | TRecdRepr _ -> iIconGroupType
-            | TFiniteUnionRepr _ -> iIconGroupUnion
-            | TILObjModelRepr(_,_,{tdKind=kind}) -> 
-                match kind with 
+            | TUnionRepr _ -> iIconGroupUnion
+            | TILObjectRepr(_,_,td) -> 
+                match td.tdKind with 
                 | ILTypeDefKind.Class -> iIconGroupClass
                 | ILTypeDefKind.ValueType -> iIconGroupStruct
                 | ILTypeDefKind.Interface -> iIconGroupInterface
                 | ILTypeDefKind.Enum -> iIconGroupEnum
                 | ILTypeDefKind.Delegate -> iIconGroupDelegate
-                | ILTypeDefKind.Other _ -> iIconGroupTypedef
             | TAsmRepr _ -> iIconGroupTypedef
-            | TMeasureableRepr _-> iIconGroupTypedef   // $$$$ TODO: glyph for units-of-measure
+            | TMeasureableRepr _-> iIconGroupTypedef 
 #if EXTENSIONTYPING
             | TProvidedTypeExtensionPoint _-> iIconGroupTypedef 
             | TProvidedNamespaceExtensionPoint  _-> iIconGroupTypedef  
 #endif
-            | TNoRepr -> iIconGroupClass  // $$$$ TODO: glyph for abstract (no-representation) types
+            | TNoRepr -> iIconGroupClass  
          
          /// Find the glyph for the given type representation.
-         let rec TypToGlyph(typ) = 
+         let typeToGlyph typ = 
             if isAppTy denv.g typ then 
                 let tcref = tcrefOfAppTy denv.g typ
-                tcref.TypeReprInfo |> ReprToGlyph 
-            elif isTupleTy denv.g typ then iIconGroupStruct
+                tcref.TypeReprInfo |> reprToGlyph 
+            elif isAnyTupleTy denv.g typ then iIconGroupStruct
             elif isFunction denv.g typ then iIconGroupDelegate
             elif isTyparTy denv.g typ then iIconGroupStruct
             else iIconGroupTypedef
 
             
          /// Find the glyph for the given value representation.
-         let ValueToGlyph(typ) = 
+         let ValueToGlyph typ = 
             if isFunction denv.g typ then iIconGroupMethod
             else iIconGroupConstant
               
          /// Find the major glyph of the given named item.       
-         let NamedItemToMajorGlyph item = 
+         let namedItemToMajorGlyph item = 
             // This may explore assemblies that are not in the reference set,
             // e.g. for type abbreviations to types not in the reference set. 
             // In this case just use iIconGroupClass.
            protectAssemblyExploration  iIconGroupClass (fun () ->
               match item with 
               | Item.Value(vref) | Item.CustomBuilder (_,vref) -> ValueToGlyph(vref.Type)
-              | Item.Types(_,typ::_) -> TypToGlyph(stripTyEqns denv.g typ)    
+              | Item.Types(_,typ::_) -> typeToGlyph (stripTyEqns denv.g typ)    
               | Item.UnionCase _
               | Item.ActivePatternCase _ -> iIconGroupEnumMember   
               | Item.ExnCase _ -> iIconGroupException   
@@ -1196,7 +1200,7 @@ module internal ItemDescriptionsImpl =
               | _ -> iIconGroupError)
 
          /// Find the minor glyph of the given named item.       
-         let NamedItemToMinorGlyph item = 
+         let namedItemToMinorGlyph item = 
             // This may explore assemblies that are not in the reference set,
             // e.g. for type abbreviations to types not in the reference set. 
             // In this case just use iIconItemNormal.
@@ -1205,16 +1209,9 @@ module internal ItemDescriptionsImpl =
               | Item.Value(vref) when isFunction denv.g vref.Type -> iIconItemSpecial
               | _ -> iIconItemNormal)
 
-         (6 * NamedItemToMajorGlyph(d)) + NamedItemToMinorGlyph(d)
+         (6 * namedItemToMajorGlyph d) + namedItemToMinorGlyph d
 
      
-    let string_is_prefix_of m n  = String.length n >= String.length m && String.sub n 0 (String.length m) = m
-
-
-
-open ItemDescriptionsImpl
-
-          
 /// An intellisense declaration
 [<Sealed>]
 type FSharpDeclarationListItem(name, glyph:int, info) =
@@ -1246,7 +1243,7 @@ type FSharpDeclarationListItem(name, glyph:int, info) =
 
                 // The dataTipSpinWaitTime limits how long we block the UI thread while a tooltip pops up next to a selected item in an IntelliSense completion list.
                 // This time appears to be somewhat amortized by the time it takes the VS completion UI to actually bring up the tooltip after selecting an item in the first place.
-                if task = null then
+                if isNull task then
                     // kick off the actual (non-cooperative) work
                     task <- System.Threading.Tasks.Task.Factory.StartNew(fun() -> 
                         let text = decl.DescriptionTextAsync |> Async.RunSynchronously

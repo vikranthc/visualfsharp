@@ -2,8 +2,6 @@ namespace FSharp.Compiler.Hosted
 open System
 open System.Text.RegularExpressions
 
-type CoreCompiler = Microsoft.FSharp.Compiler.Driver.InProcCompiler
-
 /// build issue location
 type Location =
     {
@@ -39,7 +37,8 @@ type CompilationResult =
 
 /// in-proc version of fsc.exe
 type FscCompiler() =
-    let compiler = CoreCompiler()
+    let referenceResolver = Microsoft.FSharp.Compiler.MSBuildReferenceResolver.Resolver 
+    let compiler = Microsoft.FSharp.Compiler.Driver.InProcCompiler(referenceResolver)
 
     let emptyLocation = 
         { 

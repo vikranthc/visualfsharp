@@ -12,15 +12,7 @@ open System.Runtime.InteropServices
 module internal FSharpEnvironment =
 
     /// The F# version reported in the banner
-#if OPEN_BUILD
-    let DotNetBuildString = "(private)"
-#else
-    /// The .NET runtime version that F# was built against (e.g. "v4.0.21104")
-    let DotNetRuntime = sprintf "v%s.%s.%s" Microsoft.BuildSettings.Version.Major Microsoft.BuildSettings.Version.Minor Microsoft.BuildSettings.Version.ProductBuild
-
-    /// The .NET build string that F# was built against (e.g. "4.0.21104.0")
-    let DotNetBuildString = Microsoft.BuildSettings.Version.OfFile
-#endif
+    let FSharpBannerVersion = "4.1"
 
     let versionOf<'t> =
 #if FX_RESHAPED_REFLECTION
@@ -107,12 +99,13 @@ module internal FSharpEnvironment =
         Option.ofString
             (try
                 let key = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry32)
-                if key = null then null
-                else
+                match key with
+                | null -> null
+                | _ ->
                     let sub = key.OpenSubKey(subKey)
-                    if sub = null then null
-                    else 
-                        downcast (sub.GetValue(null, null))
+                    match sub with
+                    | null -> null
+                    | _ -> downcast (sub.GetValue(null, null))
              with e->
                 System.Diagnostics.Debug.Assert(false, sprintf "Failed in Get32BitRegistryStringValueViaDotNet: %s" (e.ToString()))
                 null)
@@ -255,7 +248,8 @@ module internal FSharpEnvironment =
 #endif
 #if VS_VERSION_DEV14
                 let key40 = @"Software\Microsoft\FSharp\4.0\Runtime\v4.0"
-#else
+#endif
+#if VS_VERSION_DEV15
                 let key40 = @"Software\Microsoft\FSharp\4.1\Runtime\v4.0"
 #endif
                 let key1,key2 = 

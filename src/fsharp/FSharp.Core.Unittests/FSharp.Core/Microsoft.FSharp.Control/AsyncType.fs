@@ -247,6 +247,32 @@ type AsyncType() =
                 return s = s1
             }
         Async.RunSynchronously(a, 1000) |> Assert.IsTrue        
+
+    [<Test>]
+    member this.AwaitTaskCancellation () =
+        let test() = async {
+            let tcs = new System.Threading.Tasks.TaskCompletionSource<unit>()
+            tcs.SetCanceled()
+            try 
+                do! Async.AwaitTask tcs.Task
+                return false
+            with :? System.OperationCanceledException -> return true
+        }
+
+        Async.RunSynchronously(test()) |> Assert.IsTrue   
+        
+    [<Test>]
+    member this.AwaitTaskCancellationUntyped () =
+        let test() = async {
+            let tcs = new System.Threading.Tasks.TaskCompletionSource<unit>()
+            tcs.SetCanceled()
+            try 
+                do! Async.AwaitTask (tcs.Task :> Task)
+                return false
+            with :? System.OperationCanceledException -> return true
+        }
+
+        Async.RunSynchronously(test()) |> Assert.IsTrue    
         
     [<Test>]
     member this.TaskAsyncValueException () =

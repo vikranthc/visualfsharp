@@ -32,26 +32,28 @@ module internal Microsoft.FSharp.Compiler.ConstraintSolver
 
 open Internal.Utilities
 open Internal.Utilities.Collections
+
+open Microsoft.FSharp.Compiler 
 open Microsoft.FSharp.Compiler.AbstractIL 
+open Microsoft.FSharp.Compiler.AbstractIL.Diagnostics 
 open Microsoft.FSharp.Compiler.AbstractIL.Internal 
 open Microsoft.FSharp.Compiler.AbstractIL.Internal.Library
-open Microsoft.FSharp.Compiler 
-
-open Microsoft.FSharp.Compiler.AbstractIL.Diagnostics 
-open Microsoft.FSharp.Compiler.Range
-open Microsoft.FSharp.Compiler.Rational
 open Microsoft.FSharp.Compiler.Ast
 open Microsoft.FSharp.Compiler.ErrorLogger
+open Microsoft.FSharp.Compiler.Infos
+open Microsoft.FSharp.Compiler.AccessibilityLogic
+open Microsoft.FSharp.Compiler.AttributeChecking
+open Microsoft.FSharp.Compiler.Lib
+open Microsoft.FSharp.Compiler.MethodCalls
+open Microsoft.FSharp.Compiler.PrettyNaming
+open Microsoft.FSharp.Compiler.Range
+open Microsoft.FSharp.Compiler.Rational
+open Microsoft.FSharp.Compiler.InfoReader
 open Microsoft.FSharp.Compiler.Tast
 open Microsoft.FSharp.Compiler.Tastops
 open Microsoft.FSharp.Compiler.Tastops.DebugPrint
 open Microsoft.FSharp.Compiler.TcGlobals
-open Microsoft.FSharp.Compiler.Lib
-open Microsoft.FSharp.Compiler.Infos
-open Microsoft.FSharp.Compiler.Infos.AccessibilityLogic
-open Microsoft.FSharp.Compiler.Infos.AttributeChecking
 open Microsoft.FSharp.Compiler.TypeRelations
-open Microsoft.FSharp.Compiler.PrettyNaming
 
 //-------------------------------------------------------------------------
 // Generate type variables and record them in within the scope of the
@@ -78,7 +80,7 @@ let NewErrorTypar () = NewCompGenTypar (TyparKind.Type,TyparRigidity.Flexible,No
 let NewErrorMeasureVar () = NewCompGenTypar (TyparKind.Measure,TyparRigidity.Flexible,NoStaticReq,TyparDynamicReq.No,true)
 let NewInferenceType () = mkTyparTy (NewTypar (TyparKind.Type,TyparRigidity.Flexible,Typar(compgen_id,NoStaticReq,true),false,TyparDynamicReq.No,[],false,false))
 let NewErrorType () = mkTyparTy (NewErrorTypar ())
-let NewErrorMeasure () = MeasureVar (NewErrorMeasureVar ())
+let NewErrorMeasure () = Measure.Var (NewErrorMeasureVar ())
 
 let NewInferenceTypes l = l |> List.map (fun _ -> NewInferenceType ()) 
 
@@ -113,17 +115,39 @@ let FreshenMethInfo m (minfo:MethInfo) =
 // Subsumption of types: solve/record subtyping constraints
 //------------------------------------------------------------------------- 
 
+[<RequireQualifiedAccess>] 
+/// Information about the context of a type equation.
+type ContextInfo =
+/// No context was given.
+| NoContext
+/// The type equation comes from an omitted else branch.
+| OmittedElseBranch
+/// The type equation comes from checking an else branch.
+| ElseBranch
+/// The type equation comes from the verification of record fields.
+| RecordFields
+/// The type equation comes from the verification of a tuple in record fields.
+| TupleInRecordFields
+/// The type equation comes from a return in a computation expression.
+| ReturnInComputationExpression
+/// The type equation comes from a yield in a computation expression.
+| YieldInComputationExpression
+/// The type equation comes from a runtime type test.
+| RuntimeTypeTest of bool
+/// The type equation comes from an downcast where a upcast could be used.
+| DowncastUsedInsteadOfUpcast of bool
+
 exception ConstraintSolverTupleDiffLengths of DisplayEnv * TType list * TType list * range  * range 
-exception ConstraintSolverInfiniteTypes of DisplayEnv * TType * TType * range * range
-exception ConstraintSolverTypesNotInEqualityRelation of DisplayEnv * TType * TType * range  * range 
+exception ConstraintSolverInfiniteTypes of ContextInfo * DisplayEnv * TType * TType * range * range
+exception ConstraintSolverTypesNotInEqualityRelation of DisplayEnv * TType * TType * range * range 
 exception ConstraintSolverTypesNotInSubsumptionRelation of DisplayEnv * TType * TType * range  * range 
 exception ConstraintSolverMissingConstraint of DisplayEnv * Tast.Typar * Tast.TyparConstraint * range  * range 
 exception ConstraintSolverError of string * range * range
 exception ConstraintSolverRelatedInformation of string option * range * exn 
 
 exception ErrorFromApplyingDefault of TcGlobals * DisplayEnv * Tast.Typar * TType * exn * range
-exception ErrorFromAddingTypeEquation of TcGlobals * DisplayEnv * TType * TType * exn * range
-exception ErrorsFromAddingSubsumptionConstraint of TcGlobals * DisplayEnv * TType * TType * exn * range
+exception ErrorFromAddingTypeEquation of TcGlobals * DisplayEnv * TType * TType * exn * ContextInfo * range
+exception ErrorsFromAddingSubsumptionConstraint of TcGlobals * DisplayEnv * TType * TType * exn * ContextInfo * range
 exception ErrorFromAddingConstraint of  DisplayEnv * exn * range
 exception PossibleOverload of DisplayEnv * string * exn * range
 exception UnresolvedOverloading of DisplayEnv * exn list * string * range
@@ -136,42 +160,45 @@ type TcValF = (ValRef -> ValUseFlag -> TType list -> range -> Expr * TType)
 
 type ConstraintSolverState = 
     { 
-      g: TcGlobals;
-      amap: Import.ImportMap; 
-      InfoReader : InfoReader;
+      g: TcGlobals
+      amap: Import.ImportMap 
+      InfoReader : InfoReader
       TcVal : TcValF
       /// This table stores all unsolved, ungeneralized trait constraints, indexed by free type variable.
       /// That is, there will be one entry in this table for each free type variable in 
       /// each outstanding, unsolved, ungeneralized trait constraint. Constraints are removed from the table and resolved 
       /// each time a solution to an index variable is found. 
-      mutable ExtraCxs:  HashMultiMap<Stamp, (TraitConstraintInfo * range)>;
+      mutable ExtraCxs:  HashMultiMap<Stamp, (TraitConstraintInfo * range)>
     }
 
     static member New(g,amap,infoReader, tcVal) = 
-          { g=g; amap=amap; 
+          { g=g 
+            amap=amap 
             ExtraCxs= HashMultiMap(10, HashIdentity.Structural)
             InfoReader=infoReader
-            TcVal = tcVal } ;
+            TcVal = tcVal } 
 
 
 type ConstraintSolverEnv = 
     { 
-      SolverState: ConstraintSolverState;
+      SolverState: ConstraintSolverState
+      eContextInfo: ContextInfo
       MatchingOnly : bool
-      m: range;
-      EquivEnv: TypeEquivEnv;
+      m: range
+      EquivEnv: TypeEquivEnv
       DisplayEnv : DisplayEnv
     }
     member csenv.InfoReader = csenv.SolverState.InfoReader
     member csenv.g = csenv.SolverState.g
     member csenv.amap = csenv.SolverState.amap
     
-let MakeConstraintSolverEnv css m denv = 
-    { SolverState=css;
-      m=m;
+let MakeConstraintSolverEnv contextInfo css m denv = 
+    { SolverState=css
+      m=m
+      eContextInfo = contextInfo
       // Indicates that when unifiying ty1 = ty2, only type variables in ty1 may be solved 
-      MatchingOnly=false;
-      EquivEnv=TypeEquivEnv.Empty; 
+      MatchingOnly=false
+      EquivEnv=TypeEquivEnv.Empty 
       DisplayEnv = denv }
 
 
@@ -186,7 +213,7 @@ let rec occursCheck g un ty =
     match stripTyEqns g ty with 
     | TType_ucase(_,l)
     | TType_app (_,l) 
-    | TType_tuple l -> List.exists (occursCheck g un) l
+    | TType_tuple (_,l) -> List.exists (occursCheck g un) l
     | TType_fun (d,r) -> occursCheck g un d || occursCheck g un r
     | TType_var r   ->  typarEq un r 
     | TType_forall (_,tau) -> occursCheck g un tau
@@ -250,7 +277,7 @@ let GetMeasureOfType g ty =
     | AppTy g (tcref,[tyarg]) ->
         match stripTyEqns g tyarg with  
         | TType_measure ms -> 
-          if measureEquiv g ms MeasureOne then None else Some (tcref,ms)
+          if measureEquiv g ms Measure.One then None else Some (tcref,ms)
         | _ -> None
     | _ -> None
 
@@ -277,9 +304,10 @@ let BakedInTraitConstraintNames =
 // Run the constraint solver with undo (used during method overload resolution)
 
 type Trace = 
-    | Trace of (unit -> unit) list ref
-    static member New () =  Trace (ref [])
-    member t.Undo () = let (Trace trace) = t in List.iter (fun a -> a ()) !trace
+    { mutable actions: (unit -> unit) list  }
+    static member New () =  { actions = [] }
+    member t.Undo () = List.iter (fun a -> a ()) t.actions
+    member t.Push f = t.actions <- f :: t.actions
 
 type OptionalTrace = 
     | NoTrace
@@ -391,7 +419,7 @@ let rec TransactStaticReq (csenv:ConstraintSolverEnv) trace (tpr:Typar) req =
         let orig = tpr.StaticReq
         match trace with 
         | NoTrace -> () 
-        | WithTrace (Trace actions) -> actions := (fun () -> tpr.SetStaticReq orig) :: !actions
+        | WithTrace trace -> trace.Push (fun () -> tpr.SetStaticReq orig) 
         tpr.SetStaticReq req;
         CompleteD
 
@@ -420,7 +448,7 @@ let rec TransactDynamicReq trace (tpr:Typar) req =
     let orig = tpr.DynamicReq
     match trace with 
     | NoTrace -> () 
-    | WithTrace (Trace actions) -> actions := (fun () -> tpr.SetDynamicReq orig) :: !actions
+    | WithTrace trace -> trace.Push (fun () -> tpr.SetDynamicReq orig) 
     tpr.SetDynamicReq req;
     CompleteD
 
@@ -439,12 +467,12 @@ let SubstMeasureWarnIfRigid (csenv:ConstraintSolverEnv) trace (v:Typar) ms =
       let tpnmOpt = if v.IsCompilerGenerated then None else Some v.Name 
       SolveTypStaticReq csenv trace v.StaticReq (TType_measure ms) ++ (fun () -> 
       SubstMeasure v ms;
-      WarnD(NonRigidTypar(csenv.DisplayEnv,tpnmOpt,v.Range,TType_measure (MeasureVar v), TType_measure ms,csenv.m)))
+      WarnD(NonRigidTypar(csenv.DisplayEnv,tpnmOpt,v.Range,TType_measure (Measure.Var v), TType_measure ms,csenv.m)))
     else 
       // Propagate static requirements from 'tp' to 'ty' 
       SolveTypStaticReq csenv trace v.StaticReq (TType_measure ms) ++ (fun () -> 
       SubstMeasure v ms;
-      if v.Rigidity = TyparRigidity.Anon && measureEquiv csenv.g ms MeasureOne then 
+      if v.Rigidity = TyparRigidity.Anon && measureEquiv csenv.g ms Measure.One then 
         WarnD(Error(FSComp.SR.csCodeLessGeneric(),v.Range))
       else CompleteD)
 
@@ -462,18 +490,18 @@ let UnifyMeasureWithOne (csenv:ConstraintSolverEnv) trace ms =
     match FindPreferredTypar nonRigidVars with
     | (v,e)::vs ->
       let unexpandedCons = ListMeasureConOccsWithNonZeroExponents csenv.g false ms
-      let newms = ProdMeasures (List.map (fun (c,e') -> MeasureRationalPower (MeasureCon c, NegRational (DivRational e' e))) unexpandedCons 
-                              @ List.map (fun (v,e') -> MeasureRationalPower (MeasureVar v, NegRational (DivRational e' e))) (vs @ rigidVars))
+      let newms = ProdMeasures (List.map (fun (c,e') -> Measure.RationalPower (Measure.Con c, NegRational (DivRational e' e))) unexpandedCons 
+                              @ List.map (fun (v,e') -> Measure.RationalPower (Measure.Var v, NegRational (DivRational e' e))) (vs @ rigidVars))
 
       SubstMeasureWarnIfRigid csenv trace v newms
 
     // Otherwise we require ms to be 1
     | [] ->
-      if measureEquiv csenv.g ms MeasureOne then CompleteD else localAbortD
+      if measureEquiv csenv.g ms Measure.One then CompleteD else localAbortD
     
 /// Imperatively unify unit-of-measure expression ms1 against ms2
 let UnifyMeasures (csenv:ConstraintSolverEnv) trace ms1 ms2 = 
-    UnifyMeasureWithOne csenv trace (MeasureProd(ms1,MeasureInv ms2))
+    UnifyMeasureWithOne csenv trace (Measure.Prod(ms1,Measure.Inv ms2))
 
 /// Simplify a unit-of-measure expression ms that forms part of a type scheme. 
 /// We make substitutions for vars, which are the (remaining) bound variables
@@ -488,9 +516,9 @@ let SimplifyMeasure g vars ms =
           let newvar = if v.IsCompilerGenerated then NewAnonTypar (TyparKind.Measure,v.Range,TyparRigidity.Flexible,v.StaticReq,v.DynamicReq)
                                                 else NewNamedInferenceMeasureVar (v.Range,TyparRigidity.Flexible,v.StaticReq,v.Id)
           let remainingvars = ListSet.remove typarEq v vars
-          let newvarExpr = if SignRational e < 0 then MeasureInv (MeasureVar newvar) else MeasureVar newvar
-          let newms = (ProdMeasures (List.map (fun (c,e') -> MeasureRationalPower (MeasureCon c, NegRational (DivRational e' e))) (ListMeasureConOccsWithNonZeroExponents g false ms)
-                                   @ List.map (fun (v',e') -> if typarEq v v' then newvarExpr else MeasureRationalPower (MeasureVar v', NegRational (DivRational e' e))) (ListMeasureVarOccsWithNonZeroExponents ms)));
+          let newvarExpr = if SignRational e < 0 then Measure.Inv (Measure.Var newvar) else Measure.Var newvar
+          let newms = (ProdMeasures (List.map (fun (c,e') -> Measure.RationalPower (Measure.Con c, NegRational (DivRational e' e))) (ListMeasureConOccsWithNonZeroExponents g false ms)
+                                   @ List.map (fun (v',e') -> if typarEq v v' then newvarExpr else Measure.RationalPower (Measure.Var v', NegRational (DivRational e' e))) (ListMeasureVarOccsWithNonZeroExponents ms)));
           SubstMeasure v newms;
           match vs with 
           | [] -> (remainingvars, Some newvar) 
@@ -504,7 +532,7 @@ let rec SimplifyMeasuresInType g resultFirst ((generalizable, generalized) as pa
     match stripTyparEqns ty with 
     | TType_ucase(_,l)
     | TType_app (_,l) 
-    | TType_tuple l -> SimplifyMeasuresInTypes g param l
+    | TType_tuple (_,l) -> SimplifyMeasuresInTypes g param l
 
     | TType_fun (d,r) -> if resultFirst then SimplifyMeasuresInTypes g param [r;d] else SimplifyMeasuresInTypes g param [d;r]        
     | TType_var _   -> param
@@ -540,7 +568,7 @@ let rec GetMeasureVarGcdInType v ty =
     match stripTyparEqns ty with 
     | TType_ucase(_,l)
     | TType_app (_,l) 
-    | TType_tuple l -> GetMeasureVarGcdInTypes v l
+    | TType_tuple (_,l) -> GetMeasureVarGcdInTypes v l
 
     | TType_fun (d,r) -> GcdRational (GetMeasureVarGcdInType v d) (GetMeasureVarGcdInType v r)
     | TType_var _   -> ZeroRational
@@ -563,7 +591,7 @@ let NormalizeExponentsInTypeScheme uvars ty =
     then v 
      else
       let v' = NewAnonTypar (TyparKind.Measure,v.Range,TyparRigidity.Flexible,v.StaticReq,v.DynamicReq)
-      SubstMeasure v (MeasureRationalPower (MeasureVar v', DivRational OneRational expGcd))
+      SubstMeasure v (Measure.RationalPower (Measure.Var v', DivRational OneRational expGcd))
       v')
     
   
@@ -605,7 +633,7 @@ let SimplifyMeasuresInTypeScheme g resultFirst (generalizable:Typar list) ty con
     let generalized' = NormalizeExponentsInTypeScheme generalized ty 
     vars @ List.rev generalized'
 
-let freshMeasure () = MeasureVar (NewInferenceMeasurePar ())
+let freshMeasure () = Measure.Var (NewInferenceMeasurePar ())
 
 let CheckWarnIfRigid (csenv:ConstraintSolverEnv) ty1 (r:Typar) ty =
     let g = csenv.g
@@ -628,15 +656,15 @@ let CheckWarnIfRigid (csenv:ConstraintSolverEnv) ty1 (r:Typar) ty =
 /// Propagate all effects of adding this constraint, e.g. to solve other variables 
 let rec SolveTyparEqualsTyp (csenv:ConstraintSolverEnv) ndeep m2 trace ty1 ty =
     let m = csenv.m
-    let denv = csenv.DisplayEnv
+    
     DepthCheck ndeep m  ++ (fun () -> 
     match ty1 with 
-    | TType_var r | TType_measure (MeasureVar r) ->
+    | TType_var r | TType_measure (Measure.Var r) ->
       // The types may still be equivalent due to abbreviations, which we are trying not to eliminate 
       if typeEquiv csenv.g ty1 ty then CompleteD else
 
-      // The famous 'occursCheck' check to catch things like 'a = list<'a> 
-      if occursCheck csenv.g r ty then ErrorD (ConstraintSolverInfiniteTypes(denv,ty1,ty,m,m2)) else
+      // The famous 'occursCheck' check to catch "infinite types" like 'a = list<'a> - see also https://github.com/Microsoft/visualfsharp/issues/1170
+      if occursCheck csenv.g r ty then ErrorD (ConstraintSolverInfiniteTypes(csenv.eContextInfo,csenv.DisplayEnv,ty1,ty,m,m2)) else
 
       // Note: warn _and_ continue! 
       CheckWarnIfRigid csenv ty1 r ty ++ (fun () ->
@@ -647,7 +675,7 @@ let rec SolveTyparEqualsTyp (csenv:ConstraintSolverEnv) ndeep m2 trace ty1 ty =
       let tpdata = r.Data
       match trace with 
       | NoTrace -> () 
-      | WithTrace (Trace actions) -> actions := (fun () -> tpdata.typar_solution <- None) :: !actions
+      | WithTrace trace -> trace.Push (fun () -> tpdata.typar_solution <- None) 
       tpdata.typar_solution <- Some ty;
       
   (*   dprintf "setting typar %d to type %s at %a\n" r.Stamp ((DebugPrint.showType ty)) outputRange m; *)
@@ -692,7 +720,7 @@ and solveTypMeetsTyparConstraints (csenv:ConstraintSolverEnv) ndeep m2 trace ty 
       | TyparConstraint.IsReferenceType m2            -> SolveTypIsReferenceType            csenv ndeep m2 trace ty
       | TyparConstraint.RequiresDefaultConstructor m2 -> SolveTypRequiresDefaultConstructor csenv ndeep m2 trace ty
       | TyparConstraint.SimpleChoice(tys,m2)          -> SolveTypChoice                     csenv ndeep m2 trace ty tys
-      | TyparConstraint.CoercesTo(ty2,m2)         -> SolveTypSubsumesTypKeepAbbrevs     csenv ndeep m2 trace ty2 ty
+      | TyparConstraint.CoercesTo(ty2,m2)         -> SolveTypSubsumesTypKeepAbbrevs     csenv ndeep m2 trace None ty2 ty
       | TyparConstraint.MayResolveMember(traitInfo,m2) -> 
           SolveMemberConstraint csenv false ndeep m2 trace traitInfo ++ (fun _ -> CompleteD) 
     )))
@@ -700,11 +728,18 @@ and solveTypMeetsTyparConstraints (csenv:ConstraintSolverEnv) ndeep m2 trace ty 
         
 /// Add the constraint "ty1 = ty2" to the constraint problem. 
 /// Propagate all effects of adding this constraint, e.g. to solve type variables 
-and SolveTypEqualsTyp (csenv:ConstraintSolverEnv) ndeep m2 (trace: OptionalTrace) ty1 ty2 = 
+and SolveTypEqualsTyp (csenv:ConstraintSolverEnv) ndeep m2 (trace: OptionalTrace) (cxsln:(TraitConstraintInfo * TraitConstraintSln) option) ty1 ty2 = 
     let ndeep = ndeep + 1
     let aenv = csenv.EquivEnv
     let g = csenv.g
     if ty1 === ty2 then CompleteD else
+
+    match cxsln with
+    | Some (traitInfo, traitSln) when traitInfo.Solution.IsNone -> 
+        // If this is an overload resolution at this point it's safe to assume the candidate member being evaluated solves this member constraint.
+        TransactMemberConstraintSolution traitInfo trace traitSln
+    | _ -> ()
+
     let canShortcut = not trace.HasTrace
     let sty1 = stripTyEqnsA csenv.g canShortcut ty1
     let sty2 = stripTyEqnsA csenv.g canShortcut ty2
@@ -721,14 +756,16 @@ and SolveTypEqualsTyp (csenv:ConstraintSolverEnv) ndeep m2 (trace: OptionalTrace
 
     // Catch float<_>=float<1>, float32<_>=float32<1> and decimal<_>=decimal<1> 
     | (_, TType_app (tc2,[ms])) when (tc2.IsMeasureableReprTycon && typeEquiv csenv.g sty1 (reduceTyconRefMeasureableOrProvided csenv.g tc2 [ms]))
-        -> SolveTypEqualsTyp csenv ndeep m2 trace ms (TType_measure MeasureOne)
+        -> SolveTypEqualsTyp csenv ndeep m2 trace None ms (TType_measure Measure.One)
     | (TType_app (tc2,[ms]), _) when (tc2.IsMeasureableReprTycon && typeEquiv csenv.g sty2 (reduceTyconRefMeasureableOrProvided csenv.g tc2 [ms]))
-        -> SolveTypEqualsTyp csenv ndeep m2 trace ms (TType_measure MeasureOne)
+        -> SolveTypEqualsTyp csenv ndeep m2 trace None ms (TType_measure Measure.One)
 
-    | TType_app (tc1,l1)  ,TType_app (tc2,l2) when tyconRefEq g tc1 tc2  -> SolveTypEqualsTypEqns csenv ndeep m2 trace l1 l2
+    | TType_app (tc1,l1)  ,TType_app (tc2,l2) when tyconRefEq g tc1 tc2  -> SolveTypEqualsTypEqns csenv ndeep m2 trace None l1 l2
     | TType_app (_,_)   ,TType_app (_,_)   ->  localAbortD
-    | TType_tuple l1      ,TType_tuple l2      -> SolveTypEqualsTypEqns csenv ndeep m2 trace l1 l2
-    | TType_fun (d1,r1)   ,TType_fun (d2,r2)   -> SolveFunTypEqn csenv ndeep m2 trace d1 d2 r1 r2
+    | TType_tuple (tupInfo1,l1)      ,TType_tuple (tupInfo2,l2)      -> 
+        if evalTupInfoIsStruct tupInfo1 <> evalTupInfoIsStruct tupInfo2 then ErrorD (ConstraintSolverError(FSComp.SR.tcTupleStructMismatch(), csenv.m,m2)) else
+        SolveTypEqualsTypEqns csenv ndeep m2 trace None l1 l2
+    | TType_fun (d1,r1)   ,TType_fun (d2,r2)   -> SolveFunTypEqn csenv ndeep m2 trace None d1 d2 r1 r2
     | TType_measure ms1   ,TType_measure ms2   -> UnifyMeasures csenv trace ms1 ms2
     | TType_forall(tps1,rty1), TType_forall(tps2,rty2) -> 
         if tps1.Length <> tps2.Length then localAbortD else
@@ -737,19 +774,20 @@ and SolveTypEqualsTyp (csenv:ConstraintSolverEnv) ndeep m2 (trace: OptionalTrace
         if not (typarsAEquiv g aenv tps1 tps2) then localAbortD else
         SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace rty1 rty2 
 
-    | TType_ucase (uc1,l1)  ,TType_ucase (uc2,l2) when g.unionCaseRefEq uc1 uc2  -> SolveTypEqualsTypEqns csenv ndeep m2 trace l1 l2
+    | TType_ucase (uc1,l1)  ,TType_ucase (uc2,l2) when g.unionCaseRefEq uc1 uc2  -> SolveTypEqualsTypEqns csenv ndeep m2 trace None l1 l2
     | _  -> localAbortD
 
-and SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace ty1 ty2 = 
-   let denv = csenv.DisplayEnv
-   
+
+and SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace ty1 ty2 = SolveTypEqualsTypKeepAbbrevsWithCxsln csenv ndeep m2 trace None ty1 ty2
+
+and private SolveTypEqualsTypKeepAbbrevsWithCxsln csenv ndeep m2 trace cxsln ty1 ty2 = 
    // Back out of expansions of type abbreviations to give improved error messages. 
    // Note: any "normalization" of equations on type variables must respect the trace parameter
-   TryD (fun () -> SolveTypEqualsTyp csenv ndeep m2 trace ty1 ty2)
-        (function LocallyAbortOperationThatLosesAbbrevs -> ErrorD(ConstraintSolverTypesNotInEqualityRelation(denv,ty1,ty2,csenv.m,m2))
+   TryD (fun () -> SolveTypEqualsTyp csenv ndeep m2 trace cxsln ty1 ty2)
+        (function LocallyAbortOperationThatLosesAbbrevs -> ErrorD(ConstraintSolverTypesNotInEqualityRelation(csenv.DisplayEnv,ty1,ty2,csenv.m,m2))
                 | err -> ErrorD err)
 
-and SolveTypEqualsTypEqns csenv ndeep m2 trace origl1 origl2 = 
+and SolveTypEqualsTypEqns csenv ndeep m2 trace cxsln origl1 origl2 = 
    match origl1,origl2 with 
    | [],[] -> CompleteD 
    | _ -> 
@@ -758,16 +796,16 @@ and SolveTypEqualsTypEqns csenv ndeep m2 trace origl1 origl2 =
            match l1,l2 with 
            | [],[] -> CompleteD 
            | h1::t1, h2::t2 -> 
-               SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace h1 h2 ++ (fun () -> loop t1 t2) 
+               SolveTypEqualsTypKeepAbbrevsWithCxsln csenv ndeep m2 trace cxsln h1 h2 ++ (fun () -> loop t1 t2) 
            | _ -> 
                ErrorD(ConstraintSolverTupleDiffLengths(csenv.DisplayEnv,origl1,origl2,csenv.m,m2)) 
        loop origl1 origl2
 
-and SolveFunTypEqn csenv ndeep m2 trace d1 d2 r1 r2 = 
-    SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace d1 d2 ++ (fun () -> 
-    SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace r1 r2)
+and SolveFunTypEqn csenv ndeep m2 trace cxsln d1 d2 r1 r2 = 
+    SolveTypEqualsTypKeepAbbrevsWithCxsln csenv ndeep m2 trace cxsln d1 d2 ++ (fun () -> 
+    SolveTypEqualsTypKeepAbbrevsWithCxsln csenv ndeep m2 trace cxsln r1 r2)
 
-and SolveTypSubsumesTyp (csenv:ConstraintSolverEnv) ndeep m2 (trace: OptionalTrace) ty1 ty2 = 
+and SolveTypSubsumesTyp (csenv:ConstraintSolverEnv) ndeep m2 (trace: OptionalTrace) cxsln ty1 ty2 = 
     // 'a :> obj ---> <solved> 
     let ndeep = ndeep + 1
     let g = csenv.g
@@ -781,26 +819,28 @@ and SolveTypSubsumesTyp (csenv:ConstraintSolverEnv) ndeep m2 (trace: OptionalTra
     let sty2 = stripTyEqnsA csenv.g canShortcut ty2
     match sty1, sty2 with 
     | TType_var tp1, _ when aenv.EquivTypars.ContainsKey tp1 -> 
-        SolveTypSubsumesTyp csenv ndeep m2 trace aenv.EquivTypars.[tp1] ty2 
+        SolveTypSubsumesTyp csenv ndeep m2 trace cxsln aenv.EquivTypars.[tp1] ty2 
         
     | TType_var r1, TType_var r2 when typarEq r1 r2 -> CompleteD
     | _, TType_var r when not csenv.MatchingOnly -> SolveTyparSubtypeOfType csenv ndeep m2 trace r ty1
-    | TType_var _ , _ ->  SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace ty1 ty2
-    | TType_tuple l1    ,TType_tuple l2     -> SolveTypEqualsTypEqns csenv ndeep m2 trace l1 l2 (* nb. can unify since no variance *)
-    | TType_fun (d1,r1)  ,TType_fun (d2,r2)   -> SolveFunTypEqn csenv ndeep m2 trace d1 d2 r1 r2 (* nb. can unify since no variance *)
+    | TType_var _ , _ ->  SolveTypEqualsTypKeepAbbrevsWithCxsln csenv ndeep m2 trace cxsln ty1 ty2
+    | TType_tuple (tupInfo1,l1)      ,TType_tuple (tupInfo2,l2)      -> 
+        if evalTupInfoIsStruct tupInfo1 <> evalTupInfoIsStruct tupInfo2 then ErrorD (ConstraintSolverError(FSComp.SR.tcTupleStructMismatch(), csenv.m,m2)) else
+        SolveTypEqualsTypEqns csenv ndeep m2 trace cxsln l1 l2 (* nb. can unify since no variance *)
+    | TType_fun (d1,r1)  ,TType_fun (d2,r2)   -> SolveFunTypEqn csenv ndeep m2 trace cxsln d1 d2 r1 r2 (* nb. can unify since no variance *)
     | TType_measure ms1, TType_measure ms2    -> UnifyMeasures csenv trace ms1 ms2
 
     // Enforce the identities float=float<1>, float32=float32<1> and decimal=decimal<1> 
     | (_, TType_app (tc2,[ms])) when (tc2.IsMeasureableReprTycon && typeEquiv csenv.g sty1 (reduceTyconRefMeasureableOrProvided csenv.g tc2 [ms]))
-        -> SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace ms (TType_measure MeasureOne)
+        -> SolveTypEqualsTypKeepAbbrevsWithCxsln csenv ndeep m2 trace cxsln ms (TType_measure Measure.One)
     | (TType_app (tc2,[ms]), _) when (tc2.IsMeasureableReprTycon && typeEquiv csenv.g sty2 (reduceTyconRefMeasureableOrProvided csenv.g tc2 [ms]))
-        -> SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace ms (TType_measure MeasureOne)
+        -> SolveTypEqualsTypKeepAbbrevsWithCxsln csenv ndeep m2 trace cxsln ms (TType_measure Measure.One)
 
     | TType_app (tc1,l1)  ,TType_app (tc2,l2) when tyconRefEq g tc1 tc2  -> 
-        SolveTypEqualsTypEqns csenv ndeep m2 trace l1 l2
+        SolveTypEqualsTypEqns csenv ndeep m2 trace cxsln l1 l2
 
     | TType_ucase (uc1,l1)  ,TType_ucase (uc2,l2) when g.unionCaseRefEq uc1 uc2  -> 
-        SolveTypEqualsTypEqns csenv ndeep m2 trace l1 l2
+        SolveTypEqualsTypEqns csenv ndeep m2 trace cxsln l1 l2
 
     | _ ->  
         // By now we know the type is not a variable type 
@@ -829,7 +869,7 @@ and SolveTypSubsumesTyp (csenv:ConstraintSolverEnv) ndeep m2 (trace: OptionalTra
           match tinst with 
           | [ty1arg] -> 
               let ty2arg = destArrayTy g ty2
-              SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace ty1arg  ty2arg
+              SolveTypEqualsTypKeepAbbrevsWithCxsln csenv ndeep m2 trace cxsln ty1arg  ty2arg
           | _ -> error(InternalError("destArrayTy",m));
 
         // D<inst> :> Head<_> --> C<inst'> :> Head<_> for the 
@@ -839,11 +879,11 @@ and SolveTypSubsumesTyp (csenv:ConstraintSolverEnv) ndeep m2 (trace: OptionalTra
         else 
             match (FindUniqueFeasibleSupertype g amap m ty1 ty2) with 
             | None -> ErrorD(ConstraintSolverTypesNotInSubsumptionRelation(denv,ty1,ty2,m,m2))
-            | Some t -> SolveTypSubsumesTyp csenv ndeep m2 trace ty1 t
+            | Some t -> SolveTypSubsumesTyp csenv ndeep m2 trace cxsln ty1 t
 
-and SolveTypSubsumesTypKeepAbbrevs csenv ndeep m2 trace ty1 ty2 = 
+and SolveTypSubsumesTypKeepAbbrevs csenv ndeep m2 trace cxsln ty1 ty2 = 
    let denv = csenv.DisplayEnv
-   TryD (fun () -> SolveTypSubsumesTyp csenv ndeep m2 trace ty1 ty2)
+   TryD (fun () -> SolveTypSubsumesTyp csenv ndeep m2 trace cxsln ty1 ty2)
         (function LocallyAbortOperationThatLosesAbbrevs -> ErrorD(ConstraintSolverTypesNotInSubsumptionRelation(denv,ty1,ty2,csenv.m,m2))
                 | err -> ErrorD err)
 
@@ -869,7 +909,7 @@ and DepthCheck ndeep m =
 and SolveDimensionlessNumericType (csenv:ConstraintSolverEnv) ndeep m2 trace ty =
     match GetMeasureOfType csenv.g ty with
     | Some (tcref, _) ->
-      SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace ty (mkAppTy tcref [TType_measure MeasureOne])
+      SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace ty (mkAppTy tcref [TType_measure Measure.One])
     | None ->
       CompleteD
 
@@ -947,7 +987,7 @@ and SolveMemberConstraint (csenv:ConstraintSolverEnv) permitWeakResolution ndeep
                      //   - Neither type contributes any methods OR
                      //   - We have the special case "decimal<_> * decimal". In this case we have some 
                      //     possibly-relevant methods from "decimal" but we ignore them in this case.
-                     (isNil minfos || (isSome (GetMeasureOfType g argty1) && isDecimalTy g argty2)) in
+                     (List.isEmpty minfos || (Option.isSome (GetMeasureOfType g argty1) && isDecimalTy g argty2)) in
 
                    checkRuleAppliesInPreferenceToMethods argty1 argty2 || 
                    checkRuleAppliesInPreferenceToMethods argty2 argty1) ->
@@ -956,14 +996,14 @@ and SolveMemberConstraint (csenv:ConstraintSolverEnv) permitWeakResolution ndeep
           | Some (tcref,ms1) ->
             let ms2 = freshMeasure ()
             SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace argty2 (mkAppTy tcref [TType_measure ms2]) ++ (fun () ->
-            SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace rty (mkAppTy tcref [TType_measure (MeasureProd(ms1,if nm = "op_Multiply" then ms2 else MeasureInv ms2))]) ++ (fun () ->
+            SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace rty (mkAppTy tcref [TType_measure (Measure.Prod(ms1,if nm = "op_Multiply" then ms2 else Measure.Inv ms2))]) ++ (fun () ->
             ResultD TTraitBuiltIn))
           | _ ->
             match GetMeasureOfType g argty2 with
             | Some (tcref,ms2) ->
               let ms1 = freshMeasure ()
               SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace argty1 (mkAppTy tcref [TType_measure ms1]) ++ (fun () ->
-              SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace rty (mkAppTy tcref [TType_measure (MeasureProd(ms1, if nm = "op_Multiply" then ms2 else MeasureInv ms2))]) ++ (fun () ->
+              SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace rty (mkAppTy tcref [TType_measure (Measure.Prod(ms1, if nm = "op_Multiply" then ms2 else Measure.Inv ms2))]) ++ (fun () ->
               ResultD TTraitBuiltIn))
             | _ ->
               SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace argty2 argty1 ++ (fun () -> 
@@ -1087,7 +1127,7 @@ and SolveMemberConstraint (csenv:ConstraintSolverEnv) permitWeakResolution ndeep
           match GetMeasureOfType g argty1 with
             | Some (tcref, _) ->
               let ms1 = freshMeasure () 
-              SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace argty1 (mkAppTy tcref [TType_measure (MeasureProd (ms1,ms1))]) ++ (fun () ->
+              SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace argty1 (mkAppTy tcref [TType_measure (Measure.Prod (ms1,ms1))]) ++ (fun () ->
               SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace rty (mkAppTy tcref [TType_measure ms1]) ++ (fun () ->
               ResultD TTraitBuiltIn))
             | None ->
@@ -1135,7 +1175,7 @@ and SolveMemberConstraint (csenv:ConstraintSolverEnv) permitWeakResolution ndeep
           SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace argty2 argty1 ++ (fun () ->
           match GetMeasureOfType g argty1 with
           | None -> SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace rty argty1
-          | Some (tcref, _) -> SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace rty (mkAppTy tcref [TType_measure MeasureOne])) ++ (fun () ->
+          | Some (tcref, _) -> SolveTypEqualsTypKeepAbbrevs csenv ndeep m2 trace rty (mkAppTy tcref [TType_measure Measure.One])) ++ (fun () ->
           ResultD TTraitBuiltIn)
 
       | _ -> 
@@ -1170,7 +1210,7 @@ and SolveMemberConstraint (csenv:ConstraintSolverEnv) permitWeakResolution ndeep
           | [], None when not (tys |> List.exists (isAnyParTy g)) ->
               if tys |> List.exists (isFunTy g) then 
                   ErrorD (ConstraintSolverError(FSComp.SR.csExpectTypeWithOperatorButGivenFunction(DecompileOpName nm),m,m2)) 
-              elif tys |> List.exists (isTupleTy g) then 
+              elif tys |> List.exists (isAnyTupleTy g) then 
                   ErrorD (ConstraintSolverError(FSComp.SR.csExpectTypeWithOperatorButGivenTuple(DecompileOpName nm),m,m2)) 
               else
                   match nm, argtys with 
@@ -1199,15 +1239,15 @@ and SolveMemberConstraint (csenv:ConstraintSolverEnv) permitWeakResolution ndeep
               let calledMethGroup = 
                   minfos 
                     // curried members may not be used to satisfy constraints
-                    |> List.filter (fun minfo -> not minfo.IsCurried) 
-                    |> List.map (fun minfo -> 
-                      let callerArgs = argtys |> List.map (fun argty -> CallerArg(argty,m,false,dummyExpr))
-                      let minst = FreshenMethInfo m minfo
-                      let objtys = minfo.GetObjArgTypes(amap, m, minst)
-                      CalledMeth<Expr>(csenv.InfoReader,None,false,FreshenMethInfo,m,AccessibleFromEverywhere,minfo,minst,minst,None,objtys,[(callerArgs,[])],false,false,None))
+                    |> List.choose (fun minfo ->
+                          if minfo.IsCurried then None else
+                          let callerArgs = argtys |> List.map (fun argty -> CallerArg(argty,m,false,dummyExpr))
+                          let minst = FreshenMethInfo m minfo
+                          let objtys = minfo.GetObjArgTypes(amap, m, minst)
+                          Some(CalledMeth<Expr>(csenv.InfoReader,None,false,FreshenMethInfo,m,AccessibleFromEverywhere,minfo,minst,minst,None,objtys,[(callerArgs,[])],false,false,None)))
 
               let methOverloadResult,errors = 
-                  CollectThenUndo (fun trace -> ResolveOverloading csenv (WithTrace(trace)) nm ndeep true (0,0) AccessibleFromEverywhere calledMethGroup false (Some rty))  
+                  CollectThenUndo (fun trace -> ResolveOverloading csenv (WithTrace(trace)) nm ndeep (Some traitInfo) (0,0) AccessibleFromEverywhere calledMethGroup false (Some rty))  
 
               match recdPropSearch, methOverloadResult with 
               | Some (rfinfo, isSetProp), None -> 
@@ -1219,7 +1259,7 @@ and SolveMemberConstraint (csenv:ConstraintSolverEnv) permitWeakResolution ndeep
                   // OK, the constraint is solved. 
                   // Re-run without undo to commit the inference equations. Throw errors away 
                   let minfo = calledMeth.Method
-                  let _,errors = ResolveOverloading csenv trace nm ndeep true (0,0) AccessibleFromEverywhere calledMethGroup false (Some rty)
+                  let _,errors = ResolveOverloading csenv trace nm ndeep (Some traitInfo) (0,0) AccessibleFromEverywhere calledMethGroup false (Some rty)
 
                   errors ++ (fun () -> 
                       let isInstance = minfo.IsInstance
@@ -1238,7 +1278,7 @@ and SolveMemberConstraint (csenv:ConstraintSolverEnv) permitWeakResolution ndeep
                   let frees =  GetFreeTyparsOfMemberConstraint csenv traitInfo
 
                   // If there's nothing left to learn then raise the errors 
-                  (if (permitWeakResolution && isNil support) || isNil frees then errors  
+                  (if (permitWeakResolution && List.isEmpty support) || List.isEmpty frees then errors  
                   // Otherwise re-record the trait waiting for canonicalization 
                    else AddMemberConstraint csenv ndeep m2 trace traitInfo support frees) ++ (fun () -> ResultD TTraitUnsolved)
     ) 
@@ -1290,7 +1330,7 @@ and MemberConstraintSolutionOfMethInfo css m minfo minst =
         let minst = []   // GENERIC TYPE PROVIDERS: for generics, we would have an minst here
         let allArgVars, allArgs = minfo.GetParamTypes(amap, m, minst) |> List.concat |> List.mapi (fun i ty -> mkLocal m ("arg"+string i) ty) |> List.unzip
         let objArgVars, objArgs = (if minfo.IsInstance then [mkLocal m "this" minfo.EnclosingType] else []) |> List.unzip
-        let callMethInfoOpt, callExpr,callExprTy = TypeRelations.ProvidedMethodCalls.BuildInvokerExpressionForProvidedMethodCall css.TcVal (g, amap, mi, objArgs, NeverMutates, false, ValUseFlag.NormalValUse, allArgs, m) 
+        let callMethInfoOpt, callExpr,callExprTy = ProvidedMethodCalls.BuildInvokerExpressionForProvidedMethodCall css.TcVal (g, amap, mi, objArgs, NeverMutates, false, ValUseFlag.NormalValUse, allArgs, m) 
         let closedExprSln = ClosedExprSln (mkLambdas m [] (objArgVars@allArgVars) (callExpr, callExprTy) )
         // If the call is a simple call to an IL method with all the arguments in the natural order, then revert to use ILMethSln.
         // This is important for calls to operators on generated provided types. There is an (unchecked) condition
@@ -1319,13 +1359,13 @@ and TransactMemberConstraintSolution traitInfo trace sln  =
     traitInfo.Solution <- Some sln
     match trace with 
     | NoTrace -> () 
-    | WithTrace (Trace actions) -> actions := (fun () -> traitInfo.Solution <- prev) :: !actions
+    | WithTrace trace -> trace.Push (fun () -> traitInfo.Solution <- prev) 
 
 /// Only consider overload resolution if canonicalizing or all the types are now nominal. 
 /// That is, don't perform resolution if more nominal information may influence the set of available overloads 
 and GetRelevantMethodsForTrait (csenv:ConstraintSolverEnv) permitWeakResolution nm (TTrait(tys,_,memFlags,argtys,rty,soln) as traitInfo) : MethInfo list =
     let results = 
-        if permitWeakResolution || isNil (GetSupportOfMemberConstraint csenv traitInfo) then
+        if permitWeakResolution || List.isEmpty (GetSupportOfMemberConstraint csenv traitInfo) then
             let m = csenv.m
             let minfos = 
                 match memFlags.MemberKind with
@@ -1378,15 +1418,15 @@ and SolveRelevantMemberConstraintsForTypar (csenv:ConstraintSolverEnv) ndeep per
     let cxst = csenv.SolverState.ExtraCxs
     let tpn = tp.Stamp
     let cxs = cxst.FindAll tpn
-    if isNil cxs then ResultD false else
+    if List.isEmpty cxs then ResultD false else
     
     cxs |> List.iter (fun _ -> cxst.Remove tpn);
 
-    assert (isNil (cxst.FindAll tpn));
+    assert (List.isEmpty (cxst.FindAll tpn))
 
     match trace with 
     | NoTrace -> () 
-    | WithTrace (Trace actions) -> actions := (fun () -> cxs |> List.iter (fun cx -> cxst.Add(tpn,cx))) :: !actions
+    | WithTrace trace -> trace.Push (fun () -> cxs |> List.iter (fun cx -> cxst.Add(tpn,cx))) 
 
     cxs |> AtLeastOneD (fun (traitInfo,m2) -> 
         let csenv = { csenv with m = m2 }
@@ -1413,7 +1453,7 @@ and AddMemberConstraint (csenv:ConstraintSolverEnv) ndeep m2 trace traitInfo sup
         if not (cxs |> List.exists (fun (traitInfo2,_) -> traitsAEquiv g aenv traitInfo traitInfo2)) then 
             match trace with 
             | NoTrace -> () 
-            | WithTrace (Trace actions) -> actions := (fun () -> csenv.SolverState.ExtraCxs.Remove tpn) :: !actions
+            | WithTrace trace -> trace.Push (fun () -> csenv.SolverState.ExtraCxs.Remove tpn) 
             csenv.SolverState.ExtraCxs.Add (tpn,(traitInfo,m2))
     );
 
@@ -1587,11 +1627,10 @@ and AddConstraint (csenv:ConstraintSolverEnv) ndeep m2 trace tp newConstraint  =
         // Record a entry in the undo trace if one is provided 
         let d = tp.Data
         let orig = d.typar_constraints
-        begin match trace with 
+        match trace with 
         | NoTrace -> () 
-        | WithTrace (Trace actions) -> actions := (fun () -> d.typar_constraints <- orig) :: !actions
-        end;
-        d.typar_constraints <- newConstraints;
+        | WithTrace trace -> trace.Push (fun () -> d.typar_constraints <- orig) 
+        d.typar_constraints <- newConstraints
 
         CompleteD)))
 
@@ -1645,7 +1684,7 @@ and SolveTypeSupportsComparison (csenv:ConstraintSolverEnv) ndeep m2 trace ty =
            elif (isAppTy g ty && 
                  let tcref = tcrefOfAppTy g ty 
                  AugmentWithHashCompare.TyconIsCandidateForAugmentationWithCompare g tcref.Deref && 
-                 isNone tcref.GeneratedCompareToWithComparerValues) then
+                 Option.isNone tcref.GeneratedCompareToWithComparerValues) then
  
                ErrorD (ConstraintSolverError(FSComp.SR.csTypeDoesNotSupportComparison3(NicePrint.minimalStringOfType denv ty),m,m2))
 
@@ -1673,7 +1712,7 @@ and SolveTypSupportsEquality (csenv:ConstraintSolverEnv) ndeep m2 trace ty =
 
                // Give a good error for structural types excluded from the equality relation because of their fields
                if (AugmentWithHashCompare.TyconIsCandidateForAugmentationWithEquals g tcref.Deref && 
-                   isNone tcref.GeneratedHashAndEqualsWithComparerValues) then
+                   Option.isNone tcref.GeneratedHashAndEqualsWithComparerValues) then
 
                    ErrorD (ConstraintSolverError(FSComp.SR.csTypeDoesNotSupportEquality3(NicePrint.minimalStringOfType denv ty),m,m2))
 
@@ -1777,8 +1816,7 @@ and SolveTypRequiresDefaultConstructor (csenv:ConstraintSolverEnv) ndeep m2 trac
         CompleteD
     elif
         GetIntrinsicConstructorInfosOfType csenv.InfoReader m ty 
-        |> List.filter (IsMethInfoAccessible amap m AccessibleFromEverywhere)   
-        |> List.exists (fun x -> x.IsNullary)
+        |> List.exists (fun x -> IsMethInfoAccessible amap m AccessibleFromEverywhere x && x.IsNullary)
            then 
        if (isAppTy g ty && HasFSharpAttribute g g.attrib_AbstractClassAttribute (tcrefOfAppTy g ty).Attribs) then 
          ErrorD (ConstraintSolverError(FSComp.SR.csGenericConstructRequiresNonAbstract(NicePrint.minimalStringOfType denv typ),m,m2))
@@ -1827,7 +1865,7 @@ and CanMemberSigsMatchUpToCheck
     
     Iterate2D unifyTypes minst uminst ++ (fun () -> 
 
-    if not (permitOptArgs || isNil(unnamedCalledOptArgs)) then ErrorD(Error(FSComp.SR.csOptionalArgumentNotPermittedHere(),m)) else
+    if not (permitOptArgs || List.isEmpty unnamedCalledOptArgs) then ErrorD(Error(FSComp.SR.csOptionalArgumentNotPermittedHere(),m)) else
     
 
     let calledObjArgTys = minfo.GetObjArgTypes(amap, m, minst)
@@ -1849,7 +1887,7 @@ and CanMemberSigsMatchUpToCheck
             if isArray1DTy g calledArg.CalledArgumentType then 
                 let paramArrayElemTy = destArrayTy g calledArg.CalledArgumentType
                 let reflArgInfo = calledArg.ReflArgInfo // propgate the reflected-arg info to each param array argument
-                calledMeth.ParamArrayCallerArgs |> OptionD (IterateD (fun callerArg -> subsumeArg (CalledArg((0,0),false,NotOptional,false,None,reflArgInfo,paramArrayElemTy)) callerArg))
+                calledMeth.ParamArrayCallerArgs |> OptionD (IterateD (fun callerArg -> subsumeArg (CalledArg((0,0),false,NotOptional,NoCallerInfo,false,None,reflArgInfo,paramArrayElemTy)) callerArg))
             else
                 CompleteD)
         
@@ -1872,7 +1910,7 @@ and CanMemberSigsMatchUpToCheck
                     let calledArgTy = rfinfo.FieldType
                     rfinfo.Name, calledArgTy
             
-            subsumeArg (CalledArg((-1, 0), false, NotOptional, false, Some (mkSynId m name), ReflectedArgInfo.None, calledArgTy)) caller) )) ++ (fun () -> 
+            subsumeArg (CalledArg((-1, 0), false, NotOptional, NoCallerInfo, false, Some (mkSynId m name), ReflectedArgInfo.None, calledArgTy)) caller) )) ++ (fun () -> 
         
         // - Always take the return type into account for
         //      -- op_Explicit, op_Implicit
@@ -1881,15 +1919,15 @@ and CanMemberSigsMatchUpToCheck
         match reqdRetTyOpt with 
         | None -> CompleteD 
         | Some _  when minfo.IsConstructor -> CompleteD 
-        | Some _  when not alwaysCheckReturn && isNil unnamedCalledOutArgs -> CompleteD 
+        | Some _  when not alwaysCheckReturn && List.isEmpty unnamedCalledOutArgs -> CompleteD 
         | Some reqdRetTy -> 
             let methodRetTy = 
-                if isNil unnamedCalledOutArgs then 
+                if List.isEmpty unnamedCalledOutArgs then 
                     methodRetTy 
                 else 
                     let outArgTys = unnamedCalledOutArgs |> List.map (fun calledArg -> destByrefTy g calledArg.CalledArgumentType) 
-                    if isUnitTy g methodRetTy then mkTupledTy g outArgTys
-                    else mkTupledTy g (methodRetTy :: outArgTys)
+                    if isUnitTy g methodRetTy then mkRefTupledTy g outArgTys
+                    else mkRefTupledTy g (methodRetTy :: outArgTys)
             unifyTypes reqdRetTy methodRetTy )))))
 
 //-------------------------------------------------------------------------
@@ -1899,33 +1937,36 @@ and CanMemberSigsMatchUpToCheck
 //------------------------------------------------------------------------- 
 
 
-and private DefinitelyEquiv (csenv:ConstraintSolverEnv) isConstraint calledArg (CallerArg(callerArgTy,m,_,_) as callerArg) = 
-    let calledArgTy = AdjustCalledArgType csenv.InfoReader isConstraint calledArg callerArg
-    if not (typeEquiv csenv.g calledArgTy callerArgTy) then ErrorD(Error(FSComp.SR.csArgumentTypesDoNotMatch(),m)) else
-    CompleteD
-  
 // Assert a subtype constraint, and wrap an ErrorsFromAddingSubsumptionConstraint error around any failure 
 // to allow us to report the outer types involved in the constraint 
-and private SolveTypSubsumesTypWithReport (csenv:ConstraintSolverEnv) ndeep m trace ty1 ty2 = 
-    TryD (fun () -> SolveTypSubsumesTypKeepAbbrevs csenv ndeep m trace ty1 ty2)
-         (fun res -> ErrorD (ErrorsFromAddingSubsumptionConstraint(csenv.g,csenv.DisplayEnv,ty1,ty2,res,m)))
+and private SolveTypSubsumesTypWithReport (csenv:ConstraintSolverEnv) ndeep m trace cxsln ty1 ty2 =
+    TryD (fun () -> SolveTypSubsumesTypKeepAbbrevs csenv ndeep m trace cxsln ty1 ty2)
+         (fun res ->
+            match csenv.eContextInfo with
+            | ContextInfo.RuntimeTypeTest isOperator ->
+                // test if we can cast other way around
+                match CollectThenUndo (fun newTrace -> SolveTypSubsumesTypKeepAbbrevs csenv ndeep m (OptionalTrace.WithTrace newTrace) cxsln ty2 ty1) with 
+                | OkResult _ -> ErrorD (ErrorsFromAddingSubsumptionConstraint(csenv.g,csenv.DisplayEnv,ty1,ty2,res,ContextInfo.DowncastUsedInsteadOfUpcast isOperator,m))
+                | _ -> ErrorD (ErrorsFromAddingSubsumptionConstraint(csenv.g,csenv.DisplayEnv,ty1,ty2,res,ContextInfo.NoContext,m))
+            | _ -> ErrorD (ErrorsFromAddingSubsumptionConstraint(csenv.g,csenv.DisplayEnv,ty1,ty2,res,csenv.eContextInfo,m)))
 
-and private SolveTypEqualsTypWithReport (csenv:ConstraintSolverEnv) ndeep  m trace ty1 ty2 = 
-    TryD (fun () -> SolveTypEqualsTypKeepAbbrevs csenv ndeep m trace ty1 ty2)
-         (fun res -> ErrorD (ErrorFromAddingTypeEquation(csenv.g,csenv.DisplayEnv,ty1,ty2,res,m)))
+and private SolveTypEqualsTypWithReport contextInfo (csenv:ConstraintSolverEnv) ndeep  m trace cxsln ty1 ty2 = 
+    TryD (fun () -> SolveTypEqualsTypKeepAbbrevsWithCxsln csenv ndeep m trace cxsln ty1 ty2)
+         (fun res -> ErrorD (ErrorFromAddingTypeEquation(csenv.g,csenv.DisplayEnv,ty1,ty2,res,contextInfo,m)))
   
 and ArgsMustSubsumeOrConvert 
         (csenv:ConstraintSolverEnv)
         ndeep
         trace
+        cxsln
         isConstraint
         (calledArg: CalledArg) 
         (callerArg: CallerArg<'T>)  = 
         
     let g = csenv.g
     let m = callerArg.Range
-    let calledArgTy = AdjustCalledArgType csenv.InfoReader isConstraint calledArg callerArg
-    SolveTypSubsumesTypWithReport csenv ndeep m trace calledArgTy callerArg.Type ++ (fun () -> 
+    let calledArgTy = AdjustCalledArgType csenv.InfoReader isConstraint calledArg callerArg    
+    SolveTypSubsumesTypWithReport csenv ndeep m trace cxsln calledArgTy callerArg.Type ++ (fun () -> 
 
     if calledArg.IsParamArray && isArray1DTy g calledArgTy && not (isArray1DTy g callerArg.Type)
     then 
@@ -1933,20 +1974,20 @@ and ArgsMustSubsumeOrConvert
     else
         CompleteD)
 
-and MustUnify csenv ndeep trace ty1 ty2 = 
-    SolveTypEqualsTypWithReport csenv ndeep csenv.m trace ty1 ty2
+and MustUnify csenv ndeep trace cxsln ty1 ty2 = 
+    SolveTypEqualsTypWithReport ContextInfo.NoContext csenv ndeep csenv.m trace cxsln ty1 ty2
 
-and MustUnifyInsideUndo csenv ndeep trace ty1 ty2 = 
-    SolveTypEqualsTypWithReport csenv ndeep csenv.m (WithTrace trace) ty1 ty2
+and MustUnifyInsideUndo csenv ndeep trace cxsln ty1 ty2 = 
+    SolveTypEqualsTypWithReport ContextInfo.NoContext csenv ndeep csenv.m (WithTrace trace) cxsln ty1 ty2
 
-and ArgsMustSubsumeOrConvertInsideUndo (csenv:ConstraintSolverEnv) ndeep trace isConstraint calledArg (CallerArg(callerArgTy,m,_,_) as callerArg) = 
+and ArgsMustSubsumeOrConvertInsideUndo (csenv:ConstraintSolverEnv) ndeep trace cxsln isConstraint calledArg (CallerArg(callerArgTy,m,_,_) as callerArg) = 
     let calledArgTy = AdjustCalledArgType csenv.InfoReader isConstraint calledArg callerArg
-    SolveTypSubsumesTypWithReport csenv ndeep  m (WithTrace trace) calledArgTy callerArgTy 
+    SolveTypSubsumesTypWithReport csenv ndeep  m (WithTrace trace) cxsln calledArgTy callerArgTy 
 
-and TypesMustSubsumeOrConvertInsideUndo (csenv:ConstraintSolverEnv) ndeep trace m calledArgTy callerArgTy = 
-    SolveTypSubsumesTypWithReport csenv ndeep m trace calledArgTy callerArgTy 
+and TypesMustSubsumeOrConvertInsideUndo (csenv:ConstraintSolverEnv) ndeep trace cxsln m calledArgTy callerArgTy = 
+    SolveTypSubsumesTypWithReport csenv ndeep m trace cxsln calledArgTy callerArgTy 
 
-and ArgsEquivInsideUndo (csenv:ConstraintSolverEnv) _trace isConstraint calledArg (CallerArg(callerArgTy,m,_,_) as callerArg) = 
+and ArgsEquivInsideUndo (csenv:ConstraintSolverEnv) isConstraint calledArg (CallerArg(callerArgTy,m,_,_) as callerArg) = 
     let calledArgTy = AdjustCalledArgType csenv.InfoReader isConstraint calledArg callerArg
     if not (typeEquiv csenv.g calledArgTy callerArgTy) then ErrorD(Error(FSComp.SR.csArgumentTypesDoNotMatch(),m)) else
     CompleteD
@@ -1965,10 +2006,10 @@ and ReportNoCandidatesError (csenv:ConstraintSolverEnv) (nUnnamedCallerArgs,nNam
 
     // No version accessible 
     | ([],others),_,_,_,_ ->  
-        if nonNil others then
-            ErrorD (Error (FSComp.SR.csMemberIsNotAccessible2(methodName, (ShowAccessDomain ad)), m))
-        else
+        if List.isEmpty others then
             ErrorD (Error (FSComp.SR.csMemberIsNotAccessible(methodName, (ShowAccessDomain ad)), m))
+        else
+            ErrorD (Error (FSComp.SR.csMemberIsNotAccessible2(methodName, (ShowAccessDomain ad)), m))
     | _,([],(cmeth::_)),_,_,_ ->  
     
         // Check all the argument types. 
@@ -1980,10 +2021,22 @@ and ReportNoCandidatesError (csenv:ConstraintSolverEnv) (nUnnamedCallerArgs,nNam
 
     // One method, incorrect name/arg assignment 
     | _,_,_,_,([],[cmeth]) -> 
-        let msgNum,msgText = FSComp.SR.csRequiredSignatureIs(NicePrint.stringOfMethInfo amap m denv cmeth.Method)
+        let minfo = cmeth.Method
+        let msgNum,msgText = FSComp.SR.csRequiredSignatureIs(NicePrint.stringOfMethInfo amap m denv minfo)
         let msgNum,msgText,msgRange = 
             match cmeth.UnassignedNamedArgs with 
-            | CallerNamedArg(id,_) :: _ -> (msgNum,FSComp.SR.csMemberHasNoArgumentOrReturnProperty(methodName, id.idText, msgText),id.idRange)
+            | CallerNamedArg(id,_) :: _ -> 
+                if minfo.IsConstructor then
+                    let typ = minfo.DeclaringEntityRef
+
+                    let predictions =
+                        typ.AllInstanceFieldsAsList
+                        |> List.map (fun p -> p.Name.Replace("@",""))
+                        |> ErrorResolutionHints.FilterPredictions id.idText
+
+                    msgNum,FSComp.SR.csCtorHasNoArgumentOrReturnProperty(methodName, id.idText, msgText, ErrorResolutionHints.FormatPredictions predictions),id.idRange
+                else
+                    msgNum,FSComp.SR.csMemberHasNoArgumentOrReturnProperty(methodName, id.idText, msgText),id.idRange
             | [] -> (msgNum,msgText,m)
         ErrorD (Error ((msgNum,msgText),msgRange))
 
@@ -2026,8 +2079,7 @@ and ReportNoCandidatesError (csenv:ConstraintSolverEnv) (nUnnamedCallerArgs,nNam
 
     // One or more accessible, all the same arity, none correct 
     | ((cmeth :: cmeths2),_),_,_,_,_ when not cmeth.HasCorrectArity && cmeths2 |> List.forall (fun cmeth2 -> cmeth.TotalNumUnnamedCalledArgs = cmeth2.TotalNumUnnamedCalledArgs) -> 
-        ErrorD (Error (FSComp.SR.csMemberNotAccessible(methodName, (cmeth.ArgSets |> List.sumBy (fun x -> x.NumUnnamedCalledArgs)), methodName, cmeth.TotalNumUnnamedCalledArgs),m))
-
+        ErrorD (Error (FSComp.SR.csMemberNotAccessible(methodName, nUnnamedCallerArgs, methodName, cmeth.TotalNumUnnamedCalledArgs),m))
     // Many methods, all with incorrect number of generic arguments
     | _,_,_,([],(cmeth :: _)),_ -> 
         let msg = FSComp.SR.csIncorrectGenericInstantiation((ShowAccessDomain ad), methodName, cmeth.NumCallerTyArgs)
@@ -2057,7 +2109,7 @@ and ResolveOverloading
          trace           // The undo trace, if any
          methodName      // The name of the method being called, for error reporting
          ndeep           // Depth of inference
-         isConstraint    // We're doing overload resolution as part of constraint solving, where special rules apply for op_Explicit and op_Implicit constraints.
+         cx              // We're doing overload resolution as part of constraint solving, where special rules apply for op_Explicit and op_Implicit constraints.
          callerArgCounts // How many named/unnamed args id the caller provide? 
          ad              // The access domain of the caller, e.g. a module, type etc. 
          calledMethGroup // The set of methods being called 
@@ -2095,13 +2147,14 @@ and ResolveOverloading
           // See what candidates we have based on current inferred type information 
           // and _exact_ matches of argument types. 
           match candidates |> FilterEachThenUndo (fun newTrace calledMeth -> 
+                     let cxsln = Option.map (fun traitInfo -> (traitInfo, MemberConstraintSolutionOfMethInfo csenv.SolverState m calledMeth.Method calledMeth.CalledTyArgs)) cx
                      CanMemberSigsMatchUpToCheck 
                          csenv 
                          permitOptArgs 
                          alwaysCheckReturn
-                         (MustUnifyInsideUndo csenv ndeep newTrace) 
-                         (TypesMustSubsumeOrConvertInsideUndo csenv ndeep (WithTrace newTrace) m)
-                         (ArgsEquivInsideUndo csenv Trace.New isConstraint) 
+                         (MustUnifyInsideUndo csenv ndeep newTrace cxsln) 
+                         (TypesMustSubsumeOrConvertInsideUndo csenv ndeep (WithTrace newTrace) cxsln m)
+                         (ArgsEquivInsideUndo csenv cx.IsSome) 
                          reqdRetTyOpt 
                          calledMeth) with
           | [(calledMeth,_)] -> 
@@ -2111,15 +2164,16 @@ and ResolveOverloading
             // Now determine the applicable methods.
             // Subsumption on arguments is allowed.
             let applicable = candidates |> FilterEachThenUndo (fun newTrace candidate -> 
+                               let cxsln = Option.map (fun traitInfo -> (traitInfo, MemberConstraintSolutionOfMethInfo csenv.SolverState m candidate.Method candidate.CalledTyArgs)) cx
                                CanMemberSigsMatchUpToCheck 
                                    csenv 
                                    permitOptArgs
                                    alwaysCheckReturn
-                                   (MustUnifyInsideUndo csenv ndeep newTrace) 
-                                   (TypesMustSubsumeOrConvertInsideUndo csenv ndeep (WithTrace newTrace) m)
-                                   (ArgsMustSubsumeOrConvertInsideUndo csenv ndeep newTrace isConstraint) 
+                                   (MustUnifyInsideUndo csenv ndeep newTrace cxsln) 
+                                   (TypesMustSubsumeOrConvertInsideUndo csenv ndeep (WithTrace newTrace) cxsln m)
+                                   (ArgsMustSubsumeOrConvertInsideUndo csenv ndeep newTrace cxsln cx.IsSome) 
                                    reqdRetTyOpt 
-                                   candidate) 
+                                   candidate)
 
             let failOverloading (msg : string) errors = 
                 // Try to extract information to give better error for ambiguous op_Explicit and op_Implicit 
@@ -2148,13 +2202,14 @@ and ResolveOverloading
                 let errors = 
                     (candidates |> List.choose (fun calledMeth -> 
                             match CollectThenUndo (fun newTrace -> 
+                                         let cxsln = Option.map (fun traitInfo -> (traitInfo, MemberConstraintSolutionOfMethInfo csenv.SolverState m calledMeth.Method calledMeth.CalledTyArgs)) cx
                                          CanMemberSigsMatchUpToCheck 
                                              csenv 
                                              permitOptArgs
                                              alwaysCheckReturn
-                                             (MustUnifyInsideUndo csenv ndeep newTrace) 
-                                             (TypesMustSubsumeOrConvertInsideUndo csenv ndeep (WithTrace newTrace) m)
-                                             (ArgsMustSubsumeOrConvertInsideUndo csenv ndeep newTrace isConstraint) 
+                                             (MustUnifyInsideUndo csenv ndeep newTrace cxsln) 
+                                             (TypesMustSubsumeOrConvertInsideUndo csenv ndeep (WithTrace newTrace) cxsln m)
+                                             (ArgsMustSubsumeOrConvertInsideUndo csenv ndeep newTrace cxsln cx.IsSome) 
                                              reqdRetTyOpt 
                                              calledMeth) with 
                             | OkResult _ -> None
@@ -2319,13 +2374,15 @@ and ResolveOverloading
     match calledMethOpt with 
     | Some(calledMeth) -> 
         calledMethOpt,
-        errors ++ (fun () -> CanMemberSigsMatchUpToCheck 
+        errors ++ (fun () -> 
+                            let cxsln = Option.map (fun traitInfo -> (traitInfo, MemberConstraintSolutionOfMethInfo csenv.SolverState m calledMeth.Method calledMeth.CalledTyArgs)) cx
+                            CanMemberSigsMatchUpToCheck 
                                  csenv 
                                  permitOptArgs
                                  true
-                                 (MustUnify csenv ndeep trace) 
-                                 (TypesMustSubsumeOrConvertInsideUndo csenv ndeep trace m)// REVIEW: this should not be an "InsideUndo" operation
-                                 (ArgsMustSubsumeOrConvert csenv ndeep trace isConstraint) 
+                                 (MustUnify csenv ndeep trace cxsln) 
+                                 (TypesMustSubsumeOrConvertInsideUndo csenv ndeep trace cxsln m)// REVIEW: this should not be an "InsideUndo" operation
+                                 (ArgsMustSubsumeOrConvert csenv ndeep trace cxsln cx.IsSome) 
                                  reqdRetTyOpt 
                                  calledMeth)
 
@@ -2353,9 +2410,9 @@ let UnifyUniqueOverloading
             csenv 
             true // permitOptArgs
             true // always check return type
-            (MustUnify csenv ndeep NoTrace) 
-            (TypesMustSubsumeOrConvertInsideUndo csenv ndeep NoTrace m)
-            (ArgsMustSubsumeOrConvert csenv ndeep NoTrace false) // UnifyUniqueOverloading is not called in case of trait call - pass isConstraint=false 
+            (MustUnify csenv ndeep NoTrace None) 
+            (TypesMustSubsumeOrConvertInsideUndo csenv ndeep NoTrace None m)
+            (ArgsMustSubsumeOrConvert csenv ndeep NoTrace None false) // UnifyUniqueOverloading is not called in case of trait call - pass isConstraint=false 
             (Some reqdRetTy)
             calledMeth
         ++ (fun () -> ResultD true)
@@ -2374,12 +2431,11 @@ let EliminateConstraintsForGeneralizedTypars csenv trace (generalizedTypars: Typ
         let tpn = tp.Stamp
         let cxst = csenv.SolverState.ExtraCxs
         let cxs = cxst.FindAll tpn
-        if isNil cxs then () else
         cxs |> List.iter (fun cx -> 
-            cxst.Remove tpn;
+            cxst.Remove tpn
             match trace with 
             | NoTrace -> () 
-            | WithTrace (Trace actions) -> actions := (fun () -> (csenv.SolverState.ExtraCxs.Add (tpn,cx))) :: !actions)
+            | WithTrace trace -> trace.Push (fun () -> (csenv.SolverState.ExtraCxs.Add (tpn,cx))))
     )
 
 
@@ -2390,8 +2446,8 @@ let EliminateConstraintsForGeneralizedTypars csenv trace (generalizedTypars: Typ
 // No error recovery here : we do that on a per-expression basis.
 //------------------------------------------------------------------------- 
 
-let AddCxTypeEqualsType denv css m ty1 ty2 = 
-    SolveTypEqualsTypWithReport (MakeConstraintSolverEnv css m denv) 0 m NoTrace ty1 ty2
+let AddCxTypeEqualsType contextInfo denv css m ty1 ty2 = 
+    SolveTypEqualsTypWithReport contextInfo (MakeConstraintSolverEnv contextInfo css m denv) 0 m NoTrace None ty1 ty2
     |> RaiseOperationResult
 
 let UndoIfFailed f =
@@ -2408,74 +2464,72 @@ let UndoIfFailed f =
         ReportWarnings warns; true
 
 let AddCxTypeEqualsTypeUndoIfFailed denv css m ty1 ty2 =
-    UndoIfFailed (fun trace -> SolveTypEqualsTypKeepAbbrevs (MakeConstraintSolverEnv css m denv) 0 m (WithTrace(trace)) ty1 ty2)
+    UndoIfFailed (fun trace -> SolveTypEqualsTypKeepAbbrevs (MakeConstraintSolverEnv ContextInfo.NoContext css m denv) 0 m (WithTrace(trace)) ty1 ty2)
 
 let AddCxTypeEqualsTypeMatchingOnlyUndoIfFailed denv css m ty1 ty2 =
-    let csenv = MakeConstraintSolverEnv css m denv
+    let csenv = MakeConstraintSolverEnv ContextInfo.NoContext css m denv
     let csenv = { csenv with MatchingOnly = true }
     UndoIfFailed (fun trace -> SolveTypEqualsTypKeepAbbrevs csenv 0 m (WithTrace(trace)) ty1 ty2)
 
 let AddCxTypeMustSubsumeTypeUndoIfFailed denv css m ty1 ty2 = 
-    UndoIfFailed (fun trace -> SolveTypSubsumesTypKeepAbbrevs (MakeConstraintSolverEnv css m denv) 0 m (WithTrace(trace)) ty1 ty2)
+    UndoIfFailed (fun trace -> SolveTypSubsumesTypKeepAbbrevs (MakeConstraintSolverEnv ContextInfo.NoContext css m denv) 0 m (WithTrace(trace)) None ty1 ty2)
 
 let AddCxTypeMustSubsumeTypeMatchingOnlyUndoIfFailed denv css m ty1 ty2 = 
-    let csenv = MakeConstraintSolverEnv css m denv
+    let csenv = MakeConstraintSolverEnv ContextInfo.NoContext css m denv
     let csenv = { csenv with MatchingOnly = true }
-    UndoIfFailed (fun trace -> SolveTypSubsumesTypKeepAbbrevs csenv 0 m (WithTrace(trace)) ty1 ty2)
+    UndoIfFailed (fun trace -> SolveTypSubsumesTypKeepAbbrevs csenv 0 m (WithTrace(trace)) None ty1 ty2)
 
-
-
-let AddCxTypeMustSubsumeType denv css m trace ty1 ty2 = 
-    SolveTypSubsumesTypWithReport (MakeConstraintSolverEnv css m denv) 0 m trace ty1 ty2
+let AddCxTypeMustSubsumeType contextInfo denv css m trace ty1 ty2 = 
+    SolveTypSubsumesTypWithReport (MakeConstraintSolverEnv contextInfo css m denv) 0 m trace None ty1 ty2
     |> RaiseOperationResult
 
 let AddCxMethodConstraint denv css m trace traitInfo  =
-    TryD (fun () -> SolveMemberConstraint (MakeConstraintSolverEnv css m denv) false 0 m trace traitInfo ++ (fun _ -> CompleteD))
+    TryD (fun () -> SolveMemberConstraint (MakeConstraintSolverEnv ContextInfo.NoContext css m denv) false 0 m trace traitInfo ++ (fun _ -> CompleteD))
          (fun res -> ErrorD (ErrorFromAddingConstraint(denv,res,m)))
     |> RaiseOperationResult
 
 let AddCxTypeMustSupportNull denv css m trace ty =
-    TryD (fun () -> SolveTypSupportsNull (MakeConstraintSolverEnv css m denv) 0 m trace ty)
+    TryD (fun () -> SolveTypSupportsNull (MakeConstraintSolverEnv ContextInfo.NoContext css m denv) 0 m trace ty)
          (fun res -> ErrorD (ErrorFromAddingConstraint(denv,res,m)))
     |> RaiseOperationResult
 
 let AddCxTypeMustSupportComparison denv css m trace ty =
-    TryD (fun () -> SolveTypeSupportsComparison (MakeConstraintSolverEnv css m denv) 0 m trace ty)
+    TryD (fun () -> SolveTypeSupportsComparison (MakeConstraintSolverEnv ContextInfo.NoContext css m denv) 0 m trace ty)
          (fun res -> ErrorD (ErrorFromAddingConstraint(denv,res,m)))
     |> RaiseOperationResult
 
 let AddCxTypeMustSupportEquality denv css m trace ty =
-    TryD (fun () -> SolveTypSupportsEquality (MakeConstraintSolverEnv css m denv) 0 m trace ty)
+    TryD (fun () -> SolveTypSupportsEquality (MakeConstraintSolverEnv ContextInfo.NoContext css m denv) 0 m trace ty)
          (fun res -> ErrorD (ErrorFromAddingConstraint(denv,res,m)))
     |> RaiseOperationResult
 
 let AddCxTypeMustSupportDefaultCtor denv css m trace ty =
-    TryD (fun () -> SolveTypRequiresDefaultConstructor (MakeConstraintSolverEnv css m denv) 0 m trace ty)
+    TryD (fun () -> SolveTypRequiresDefaultConstructor (MakeConstraintSolverEnv ContextInfo.NoContext css m denv) 0 m trace ty)
          (fun res -> ErrorD (ErrorFromAddingConstraint(denv,res,m)))
     |> RaiseOperationResult
 
 let AddCxTypeIsReferenceType denv css m trace ty =
-    TryD (fun () -> SolveTypIsReferenceType (MakeConstraintSolverEnv css m denv) 0 m trace ty)
+    TryD (fun () -> SolveTypIsReferenceType (MakeConstraintSolverEnv ContextInfo.NoContext css m denv) 0 m trace ty)
          (fun res -> ErrorD (ErrorFromAddingConstraint(denv,res,m)))
     |> RaiseOperationResult
 
 let AddCxTypeIsValueType denv css m trace ty =
-    TryD (fun () -> SolveTypIsNonNullableValueType (MakeConstraintSolverEnv css m denv) 0 m trace ty)
+    TryD (fun () -> SolveTypIsNonNullableValueType (MakeConstraintSolverEnv ContextInfo.NoContext css m denv) 0 m trace ty)
          (fun res -> ErrorD (ErrorFromAddingConstraint(denv,res,m)))
     |> RaiseOperationResult
     
 let AddCxTypeIsUnmanaged denv css m trace ty =
-    TryD (fun () -> SolveTypIsUnmanaged (MakeConstraintSolverEnv css m denv) 0 m trace ty)
+    TryD (fun () -> SolveTypIsUnmanaged (MakeConstraintSolverEnv ContextInfo.NoContext css m denv) 0 m trace ty)
          (fun res -> ErrorD (ErrorFromAddingConstraint(denv,res,m)))
     |> RaiseOperationResult
 
 let AddCxTypeIsEnum denv css m trace ty underlying =
-    TryD (fun () -> SolveTypIsEnum (MakeConstraintSolverEnv css m denv) 0 m trace ty underlying)
+    TryD (fun () -> SolveTypIsEnum (MakeConstraintSolverEnv ContextInfo.NoContext css m denv) 0 m trace ty underlying)
          (fun res -> ErrorD (ErrorFromAddingConstraint(denv,res,m)))
     |> RaiseOperationResult
 
 let AddCxTypeIsDelegate denv css m trace ty aty bty =
-    TryD (fun () -> SolveTypIsDelegate (MakeConstraintSolverEnv css m denv) 0 m trace ty aty bty)
+    TryD (fun () -> SolveTypIsDelegate (MakeConstraintSolverEnv ContextInfo.NoContext css m denv) 0 m trace ty aty bty)
          (fun res -> ErrorD (ErrorFromAddingConstraint(denv,res,m)))
     |> RaiseOperationResult
 
@@ -2484,7 +2538,7 @@ let CodegenWitnessThatTypSupportsTraitConstraint tcVal g amap m (traitInfo:Trait
                 TcVal = tcVal
                 ExtraCxs=HashMultiMap(10, HashIdentity.Structural)
                 InfoReader=new InfoReader(g,amap) }
-    let csenv = MakeConstraintSolverEnv css m (DisplayEnv.Empty g)
+    let csenv = MakeConstraintSolverEnv ContextInfo.NoContext css m (DisplayEnv.Empty g)
     SolveMemberConstraint csenv true 0 m NoTrace traitInfo ++ (fun _res -> 
         let sln = 
               match traitInfo.Solution with 
@@ -2539,7 +2593,7 @@ let CodegenWitnessThatTypSupportsTraitConstraint tcVal g amap m (traitInfo:Trait
                 let wrap,h' = mkExprAddrOfExpr g true false PossiblyMutates h None m 
                 ResultD (Some (wrap (Expr.Op(TOp.TraitCall(traitInfo), [], (h' :: t), m))))
             else        
-                ResultD (Some (Infos.MakeMethInfoCall amap m minfo methArgTys argExprs ))
+                ResultD (Some (MakeMethInfoCall amap m minfo methArgTys argExprs ))
 
         | Choice2Of4 (tinst,rfref,isSet) -> 
             let res = 
@@ -2547,11 +2601,21 @@ let CodegenWitnessThatTypSupportsTraitConstraint tcVal g amap m (traitInfo:Trait
                 | true, true, 1 -> 
                         Some (mkStaticRecdFieldSet (rfref, tinst, argExprs.[0], m))
                 | true, false, 2 -> 
-                        Some (mkRecdFieldSet g (argExprs.[0], rfref, tinst, argExprs.[1], m))
+                        // If we resolve to an instance field on a struct and we haven't yet taken 
+                        // the address of the object then go do that 
+                        if rfref.Tycon.IsStructOrEnumTycon  && not (isByrefTy g (tyOfExpr g argExprs.[0])) then 
+                            let h = List.head argExprs
+                            let wrap,h' = mkExprAddrOfExpr g true false DefinitelyMutates h None m 
+                            Some (wrap (mkRecdFieldSetViaExprAddr (h', rfref, tinst, argExprs.[1], m)))
+                        else        
+                            Some (mkRecdFieldSetViaExprAddr (argExprs.[0], rfref, tinst, argExprs.[1], m))
                 | false, true, 0 -> 
                         Some (mkStaticRecdFieldGet (rfref, tinst, m))
                 | false, false, 1 -> 
-                        Some (mkRecdFieldGet g (argExprs.[0], rfref, tinst, m))
+                        if rfref.Tycon.IsStructOrEnumTycon  && isByrefTy g (tyOfExpr g argExprs.[0]) then 
+                            Some (mkRecdFieldGetViaExprAddr (argExprs.[0], rfref, tinst, m))
+                        else 
+                            Some (mkRecdFieldGet g (argExprs.[0], rfref, tinst, m))
                 | _ -> None 
             ResultD res
         | Choice3Of4 expr -> ResultD (Some (MakeApplicationAndBetaReduce g (expr, tyOfExpr g expr, [], argExprs, m)))
@@ -2562,7 +2626,7 @@ let ChooseTyparSolutionAndSolve css denv tp =
     let g = css.g
     let amap = css.amap
     let max,m = ChooseTyparSolutionAndRange g amap tp 
-    let csenv = MakeConstraintSolverEnv css m denv
+    let csenv = MakeConstraintSolverEnv ContextInfo.NoContext css m denv
     TryD (fun () -> SolveTyparEqualsTyp csenv 0 m NoTrace (mkTyparTy tp) max)
          (fun err -> ErrorD(ErrorFromApplyingDefault(g,denv,tp,max,err,m)))
     |> RaiseOperationResult
@@ -2572,7 +2636,7 @@ let ChooseTyparSolutionAndSolve css denv tp =
 let CheckDeclaredTypars denv css m typars1 typars2 = 
     TryD (fun () -> 
             CollectThenUndo (fun trace -> 
-               SolveTypEqualsTypEqns (MakeConstraintSolverEnv css m denv) 0 m (WithTrace(trace)) 
+               SolveTypEqualsTypEqns (MakeConstraintSolverEnv ContextInfo.NoContext css m denv) 0 m (WithTrace(trace)) None 
                    (List.map mkTyparTy typars1) 
                    (List.map mkTyparTy typars2)))
          (fun res -> ErrorD (ErrorFromAddingConstraint(denv,res,m)))
@@ -2590,12 +2654,12 @@ let IsApplicableMethApprox g amap m (minfo:MethInfo) availObjTy =
                     TcVal = (fun _ -> failwith "should not be called")
                     ExtraCxs=HashMultiMap(10, HashIdentity.Structural)
                     InfoReader=new InfoReader(g,amap) }
-        let csenv = MakeConstraintSolverEnv css m (DisplayEnv.Empty g)
+        let csenv = MakeConstraintSolverEnv ContextInfo.NoContext css m (DisplayEnv.Empty g)
         let minst = FreshenMethInfo m minfo
         match minfo.GetObjArgTypes(amap, m, minst) with
         | [reqdObjTy] -> 
 
-            TryD (fun () -> SolveTypSubsumesTyp csenv 0 m NoTrace reqdObjTy availObjTy ++ (fun () -> ResultD true))
+            TryD (fun () -> SolveTypSubsumesTyp csenv 0 m NoTrace None reqdObjTy availObjTy ++ (fun () -> ResultD true))
                  (fun _err -> ResultD false)
             |> CommitOperationResult
         | _ -> true

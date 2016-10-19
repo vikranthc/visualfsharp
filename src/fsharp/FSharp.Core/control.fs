@@ -50,7 +50,7 @@ namespace System.Threading
                     
             member this.Equals(ctr:CancellationTokenRegistration) =
                 match this.source with
-                |   null -> ctr.source = null
+                |   null -> isNull ctr.source
                 |   _ ->  this.source.Equals(ctr.source) && this.id = ctr.id
                 
             override this.Equals(o:obj) =
@@ -91,7 +91,7 @@ namespace System.Threading
                     
             member this.Equals(ct:CancellationToken) =
                 match this.source with
-                |   null -> ct.source = null
+                |   null -> isNull ct.source
                 |   _ -> this.source.Equals(ct.source)
                 
             override this.Equals(o:obj) =
@@ -281,7 +281,6 @@ namespace Microsoft.FSharp.Control
     #nowarn "40"
     #nowarn "21"
     #nowarn "47"
-    #nowarn "44" // This construct is deprecated. 
     #nowarn "52" // The value has been copied to ensure the original is not mutated by this operation
     #nowarn "67" // This type test or downcast will always hold
     #nowarn "864" // IObservable.Subscribe
@@ -299,7 +298,7 @@ namespace Microsoft.FSharp.Control
 
 #if FX_RESHAPED_REFLECTION
     open ReflectionAdapters
-    type BindingFlags = ReflectionAdapters.BindingFlags
+    type internal BindingFlags = ReflectionAdapters.BindingFlags
 #else
     type BindingFlags = System.Reflection.BindingFlags
 #endif
@@ -601,7 +600,7 @@ namespace Microsoft.FSharp.Control
         let mutable defaultCancellationTokenSource = new CancellationTokenSource()
 
         [<NoEquality; NoComparison>]
-        type Result<'T>  =
+        type AsyncImplResult<'T>  =
         |   Ok of 'T
         |   Error of ExceptionDispatchInfo
         |   Canceled of OperationCanceledException
@@ -805,9 +804,9 @@ namespace Microsoft.FSharp.Control
         let reify res =
             unprotectedPrimitive (fun args ->
                 match res with
-                |   Result.Ok r -> args.cont r
-                |   Result.Error e -> args.aux.econt e
-                |   Result.Canceled oce -> args.aux.ccont oce)
+                |   AsyncImplResult.Ok r -> args.cont r
+                |   AsyncImplResult.Error e -> args.aux.econt e
+                |   AsyncImplResult.Canceled oce -> args.aux.ccont oce)
 
         //----------------------------------
         // BUILDER OPREATIONS
@@ -909,8 +908,12 @@ namespace Microsoft.FSharp.Control
             resultA()
 
         /// Implement use/Dispose
-        let usingA (r:'T :> IDisposable) f =  
-            tryFinallyA (fun () -> r.Dispose()) (callA f r)
+        let usingA (r:'T :> IDisposable) (f:'T -> Async<'a>) : Async<'a> =
+            let mutable x = 0
+            let disposeFunction _ =
+                if Interlocked.CompareExchange(&x, 1, 0) = 0 then
+                    Microsoft.FSharp.Core.LanguagePrimitives.IntrinsicFunctions.Dispose r
+            tryFinallyA disposeFunction (callA f r) |> whenCancelledA disposeFunction
 
         let ignoreA p = 
             bindA p (fun _ -> doneA)
@@ -1236,7 +1239,7 @@ namespace Microsoft.FSharp.Control
                         let subSource = new LinkedSubSource(token)
                         subSource.Token, Some subSource
                 
-            use resultCell = new ResultCell<Result<_>>()
+            use resultCell = new ResultCell<AsyncImplResult<_>>()
             queueAsync 
                     token                        
                     (fun res -> resultCell.RegisterResult(Ok(res),reuseThread=true))
@@ -1262,7 +1265,7 @@ namespace Microsoft.FSharp.Control
                 commit res
 
         let private RunSynchronouslyInCurrentThread (token:CancellationToken,computation) =
-            use resultCell = new ResultCell<Result<_>>()
+            use resultCell = new ResultCell<AsyncImplResult<_>>()
             let trampolineHolder = TrampolineHolder()
 
             trampolineHolder.Protect
@@ -1549,12 +1552,13 @@ namespace Microsoft.FSharp.Control
     // Contains helpers that will attach continuation to the given task.
     // Should be invoked as a part of protectedPrimitive(withResync) call
     module TaskHelpers = 
-        let continueWith (task : Task<'T>, args) = 
+        let continueWith (task : Task<'T>, args, useCcontForTaskCancellation) = 
 
             let continuation (completedTask : Task<_>) : unit =
                 args.aux.trampolineHolder.Protect((fun () ->
                     if completedTask.IsCanceled then
-                        args.aux.ccont (new OperationCanceledException())
+                        if useCcontForTaskCancellation then args.aux.ccont(new OperationCanceledException())
+                        else args.aux.econt (ExceptionDispatchInfo.Capture(new TaskCanceledException()))
                     elif completedTask.IsFaulted then
                         args.aux.econt (MayLoseStackTrace(completedTask.Exception))
                     else
@@ -1562,12 +1566,13 @@ namespace Microsoft.FSharp.Control
 
             task.ContinueWith(Action<Task<'T>>(continuation), TaskContinuationOptions.None) |> ignore |> fake
 
-        let continueWithUnit (task : Task, args) = 
+        let continueWithUnit (task : Task, args, useCcontForTaskCancellation) = 
 
             let continuation (completedTask : Task) : unit =
                 args.aux.trampolineHolder.Protect((fun () ->
                     if completedTask.IsCanceled then
-                        args.aux.ccont (new OperationCanceledException())
+                        if useCcontForTaskCancellation then args.aux.ccont (new OperationCanceledException())
+                        else args.aux.econt (ExceptionDispatchInfo.Capture(new TaskCanceledException()))
                     elif completedTask.IsFaulted then
                         args.aux.econt (MayLoseStackTrace(completedTask.Exception))
                     else
@@ -1624,7 +1629,7 @@ namespace Microsoft.FSharp.Control
                         null
 
                 match edi with
-                | null -> TaskHelpers.continueWithUnit(task, args)
+                | null -> TaskHelpers.continueWithUnit (task, args, true)
                 | _ -> aux.econt edi
             )
 #else
@@ -1792,7 +1797,7 @@ namespace Microsoft.FSharp.Control
 
 
         /// Await the result of a result cell without a timeout
-        static member ReifyResult(result:Result<'T>) : Async<'T> =
+        static member ReifyResult(result:AsyncImplResult<'T>) : Async<'T> =
             unprotectedPrimitive(fun ({ aux = aux } as args) -> 
                    (match result with 
                     | Ok v -> args.cont v 
@@ -1800,7 +1805,7 @@ namespace Microsoft.FSharp.Control
                     | Canceled exn -> aux.ccont exn) )
 
         /// Await the result of a result cell without a timeout       
-        static member AwaitAndReifyResult(resultCell:ResultCell<Result<'T>>) : Async<'T> =
+        static member AwaitAndReifyResult(resultCell:ResultCell<AsyncImplResult<'T>>) : Async<'T> =
             async {
                 let! result = resultCell.AwaitResult
                 return! Async.ReifyResult(result)
@@ -1812,7 +1817,7 @@ namespace Microsoft.FSharp.Control
         ///
         /// Always resyncs to the synchronization context if needed, by virtue of it being built
         /// from primitives which resync.
-        static member AsyncWaitAsyncWithTimeout(innerCTS : CancellationTokenSource, resultCell:ResultCell<Result<'T>>,millisecondsTimeout) : Async<'T> =
+        static member AsyncWaitAsyncWithTimeout(innerCTS : CancellationTokenSource, resultCell:ResultCell<AsyncImplResult<'T>>,millisecondsTimeout) : Async<'T> =
             match millisecondsTimeout with
             | None | Some -1 -> 
                 resultCell |> Async.AwaitAndReifyResult
@@ -1918,9 +1923,9 @@ namespace Microsoft.FSharp.Control
 
          let cts = new CancellationTokenSource()
 
-         let result = new ResultCell<Result<'T>>()
+         let result = new ResultCell<AsyncImplResult<'T>>()
 
-         member s.SetResult(v: Result<'T>) =  
+         member s.SetResult(v: AsyncImplResult<'T>) =  
              result.RegisterResult(v,reuseThread=true) |> unfake
              match callback with
              | null -> ()
@@ -2118,12 +2123,12 @@ namespace Microsoft.FSharp.Control
 #else
         static member AwaitTask (task:Task<'T>) : Async<'T> = 
             protectedPrimitiveWithResync (fun args -> 
-                TaskHelpers.continueWith(task, args)
+                TaskHelpers.continueWith(task, args, false)
                 )
 
         static member AwaitTask (task:Task) : Async<unit> = 
             protectedPrimitiveWithResync (fun args -> 
-                TaskHelpers.continueWithUnit(task, args)
+                TaskHelpers.continueWithUnit (task, args, false)
                 )
 #endif
 
@@ -2140,7 +2145,7 @@ namespace Microsoft.FSharp.Control
 #if FX_NO_BEGINEND_READWRITE
                 // use combo protectedPrimitiveWithResync + continueWith instead of AwaitTask so we can pass cancellation token to the ReadAsync task
                 protectedPrimitiveWithResync (fun ({ aux = aux } as args) ->
-                    TaskHelpers.continueWith(stream.ReadAsync(buffer, offset, count, aux.token), args)
+                    TaskHelpers.continueWith(stream.ReadAsync(buffer, offset, count, aux.token), args, false)
                     )
 #else
                 Async.FromBeginEnd (buffer,offset,count,stream.BeginRead,stream.EndRead)
@@ -2164,7 +2169,7 @@ namespace Microsoft.FSharp.Control
 #if FX_NO_BEGINEND_READWRITE
                 // use combo protectedPrimitiveWithResync + continueWith instead of AwaitTask so we can pass cancellation token to the WriteAsync task
                 protectedPrimitiveWithResync ( fun ({ aux = aux} as args) ->
-                    TaskHelpers.continueWithUnit(stream.WriteAsync(buffer, offset, count, aux.token), args)
+                    TaskHelpers.continueWithUnit(stream.WriteAsync(buffer, offset, count, aux.token), args, false)
                     )
 #else
                 Async.FromBeginEnd (buffer,offset,count,stream.BeginWrite,stream.EndWrite)
@@ -2207,7 +2212,7 @@ namespace Microsoft.FSharp.Control
                     | :? System.Net.WebException as webExn 
                             when webExn.Status = System.Net.WebExceptionStatus.RequestCanceled && !canceled -> 
 
-                        Async.ReifyResult(Result.Canceled (OperationCanceledException webExn.Message))
+                        Async.ReifyResult(AsyncImplResult.Canceled (OperationCanceledException webExn.Message))
                     | _ -> 
                         edi.ThrowAny())
 
@@ -2227,7 +2232,7 @@ namespace Microsoft.FSharp.Control
                                 event.RemoveHandler handle
                                 if args.Cancelled then
                                     ccont (new OperationCanceledException())
-                                elif args.Error <> null then
+                                elif isNotNull args.Error then
                                     econt args.Error
                                 else
                                     cont (result args)
@@ -2279,9 +2284,9 @@ namespace Microsoft.FSharp.Control
                 let! ct = Async.CancellationToken
                 let start a f =
                     Async.StartWithContinuationsUsingDispatchInfo(a, 
-                        (fun res -> c.RegisterResult(f res |> Result.Ok, reuseThread=false) |> unfake),
-                        (fun edi -> c.RegisterResult(edi |> Result.Error, reuseThread=false) |> unfake),
-                        (fun oce -> c.RegisterResult(oce |> Result.Canceled, reuseThread=false) |> unfake),
+                        (fun res -> c.RegisterResult(f res |> AsyncImplResult.Ok, reuseThread=false) |> unfake),
+                        (fun edi -> c.RegisterResult(edi |> AsyncImplResult.Error, reuseThread=false) |> unfake),
+                        (fun oce -> c.RegisterResult(oce |> AsyncImplResult.Canceled, reuseThread=false) |> unfake),
                         cancellationToken = ct
                         )
                 start a1 Choice1Of2
@@ -2514,8 +2519,8 @@ namespace Microsoft.FSharp.Control
                     | Some res -> return res }
 
         interface System.IDisposable with
-            member x.Dispose() =
-                if pulse <> null then (pulse :> IDisposable).Dispose()
+            member __.Dispose() =
+                if isNotNull pulse then (pulse :> IDisposable).Dispose()
 
 #if DEBUG
         member x.UnsafeContents =

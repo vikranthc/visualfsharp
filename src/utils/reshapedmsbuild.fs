@@ -1,4 +1,4 @@
-// Copyright (c) Microsoft Open Technologies, Inc.  All Rights Reserved.  Licensed under the Apache License, Version 2.0.  See License.txt in the project root for license information.
+// Copyright (c) Microsoft.  All Rights Reserved.  Licensed under the Apache License, Version 2.0.  See License.txt in the project root for license information.
 
 namespace Microsoft.Build.Tasks
 namespace Microsoft.Build.Utilities
@@ -83,7 +83,9 @@ module internal MsBuildAdapters =
     | Version45 = 5
     | Version451 = 6
     | Version46 = 7
-    | VersionLatest = 7  //TargetDotNetFrameworkVersion.Version46
+    | Version461 = 8
+    | Version452 = 9
+    | VersionLatest = 8  //TargetDotNetFrameworkVersion.Version461
 
     /// <summary>
     /// Used to specify the targeted bitness of the .NET Framework for some methods of ToolLocationHelper
@@ -110,16 +112,19 @@ module internal ToolLocationHelper =
     let dotNetFrameworkVersion40  = Version(4, 0)
     let dotNetFrameworkVersion45  = Version(4, 5)
     let dotNetFrameworkVersion451 = Version(4, 5, 1)
+    let dotNetFrameworkVersion452 = Version(4, 5, 2)
     let dotNetFrameworkVersion46  = Version(4, 6)
+    let dotNetFrameworkVersion461  = Version(4, 6, 1)
 
     // visual studio versions.
     let visualStudioVersion100 = new Version(10, 0);
     let visualStudioVersion110 = new Version(11, 0);
     let visualStudioVersion120 = new Version(12, 0);
     let visualStudioVersion140 = new Version(14, 0);
+    let visualStudioVersion150 = new Version(15, 0);
 
     // keep this up-to-date; always point to the latest visual studio version.
-    let visualStudioVersionLatest = visualStudioVersion140;
+    let visualStudioVersionLatest = visualStudioVersion150;
 
     let dotNetFrameworkRegistryPath = "SOFTWARE\\Microsoft\\.NETFramework";
     let dotNetFrameworkSetupRegistryPath = "SOFTWARE\\Microsoft\\NET Framework Setup\\NDP";
@@ -198,7 +203,9 @@ module internal ToolLocationHelper =
         | TargetDotNetFrameworkVersion.Version40 -> dotNetFrameworkVersion40
         | TargetDotNetFrameworkVersion.Version45 -> dotNetFrameworkVersion45
         | TargetDotNetFrameworkVersion.Version451 -> dotNetFrameworkVersion451
+        | TargetDotNetFrameworkVersion.Version452 -> dotNetFrameworkVersion452
         | TargetDotNetFrameworkVersion.Version46 -> dotNetFrameworkVersion46
+        | TargetDotNetFrameworkVersion.Version461 -> dotNetFrameworkVersion461
         | _ -> raise (getArgumentException version)
 
     let complusInstallRoot = Environment.GetEnvironmentVariable("COMPLUS_INSTALLROOT")
@@ -734,7 +741,9 @@ module internal ToolLocationHelper =
             CreateDotNetFrameworkSpecForV4 dotNetFrameworkVersion40  visualStudioVersion100     // v4.0
             CreateDotNetFrameworkSpecForV4 dotNetFrameworkVersion45  visualStudioVersion110     // v4.5
             CreateDotNetFrameworkSpecForV4 dotNetFrameworkVersion451 visualStudioVersion120     // v4.5.1
+            CreateDotNetFrameworkSpecForV4 dotNetFrameworkVersion452 visualStudioVersion150     // v4.5.2
             CreateDotNetFrameworkSpecForV4 dotNetFrameworkVersion46  visualStudioVersion140     // v4.6
+            CreateDotNetFrameworkSpecForV4 dotNetFrameworkVersion461 visualStudioVersion150     // v4.6.1
         |]
         array.ToDictionary<DotNetFrameworkSpec, Version>(fun spec -> spec.Version)
 

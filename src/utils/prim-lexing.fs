@@ -74,28 +74,27 @@ namespace Internal.Utilities.Text.Lexing
     and [<Sealed>]
         internal LexBuffer<'Char>(filler: LexBufferFiller<'Char>) = 
         let context = new Dictionary<string,obj>(1) 
-        let mutable buffer=[||];
+        let mutable buffer = [||]
         /// number of valid characters beyond bufferScanStart.
-        let mutable bufferMaxScanLength=0;
+        let mutable bufferMaxScanLength = 0
         /// count into the buffer when scanning.
-        let mutable bufferScanStart=0;
+        let mutable bufferScanStart = 0
         /// number of characters scanned so far.
-        let mutable bufferScanLength=0;
+        let mutable bufferScanLength = 0
         /// length of the scan at the last accepting state.
-        let mutable lexemeLength=0;
+        let mutable lexemeLength = 0
         /// action related to the last accepting state.
-        let mutable bufferAcceptAction=0;
-        let mutable eof = false;
-        let mutable startPos = Position.Empty ;
+        let mutable bufferAcceptAction = 0
+        let mutable eof = false
+        let mutable startPos = Position.Empty
         let mutable endPos = Position.Empty
 
-        // Throw away all the input besides the lexeme 
-              
+        // Throw away all the input besides the lexeme
         let discardInput () = 
             let keep = Array.sub buffer bufferScanStart bufferScanLength
             let nkeep = keep.Length 
-            Array.blit keep 0 buffer 0 nkeep;
-            bufferScanStart <- 0;
+            Array.blit keep 0 buffer 0 nkeep
+            bufferScanStart <- 0
             bufferMaxScanLength <- nkeep
                  
               
@@ -142,7 +141,7 @@ namespace Internal.Utilities.Text.Lexing
         member lexbuf.EnsureBufferSize n = 
             if lexbuf.BufferScanPos + n >= buffer.Length then 
                 let repl = Array.zeroCreate (lexbuf.BufferScanPos + n) 
-                Array.blit buffer bufferScanStart repl bufferScanStart bufferScanLength;
+                Array.blit buffer bufferScanStart repl bufferScanStart bufferScanLength
                 buffer <- repl
 
 
@@ -151,8 +150,8 @@ namespace Internal.Utilities.Text.Lexing
             let extension= Array.zeroCreate 4096
             let filler (lexBuffer: LexBuffer<'Char>) =
                  let n = f (extension,0,extension.Length)
-                 lexBuffer.EnsureBufferSize n;
-                 Array.blit extension 0 lexBuffer.Buffer lexBuffer.BufferScanPos n;
+                 lexBuffer.EnsureBufferSize n
+                 Array.blit extension 0 lexBuffer.Buffer lexBuffer.BufferScanPos n
                  lexBuffer.BufferMaxScanLength <- lexBuffer.BufferScanLength + n
             new LexBuffer<'Char>(filler)
               
@@ -184,9 +183,9 @@ namespace Internal.Utilities.Text.Lexing
                     if lexBuffer.IsPastEndOfStream then failwith "End of file on lexing stream";
                     lexBuffer.IsPastEndOfStream <- true;
                     //printf "state %d --> %d on eof\n" state snew;
-                    scanUntilSentinel(lexBuffer,snew)
+                    scanUntilSentinel lexBuffer snew
             else 
-                scanUntilSentinel(lexBuffer, state)
+                scanUntilSentinel lexBuffer state
 
         let onAccept (lexBuffer:LexBuffer<char>,a) = 
             lexBuffer.LexemeLength <- lexBuffer.BufferScanLength;
@@ -201,7 +200,7 @@ namespace Internal.Utilities.Text.Lexing
         let numUnicodeCategories = 30 
         let numLowUnicodeChars = 128 
         let numSpecificUnicodeChars = (trans.[0].Length - 1 - numLowUnicodeChars - numUnicodeCategories)/2
-        let lookupUnicodeCharacters (state,inp) = 
+        let lookupUnicodeCharacters state inp =
             let inpAsInt = int inp
             // Is it a fast ASCII character?
             if inpAsInt < numLowUnicodeChars then 
@@ -235,7 +234,7 @@ namespace Internal.Utilities.Text.Lexing
                 loop 0
         let eofPos    = numLowUnicodeChars + 2*numSpecificUnicodeChars + numUnicodeCategories 
         
-        let rec scanUntilSentinel(lexBuffer,state) =
+        let rec scanUntilSentinel lexBuffer state =
             // Return an endOfScan after consuming the input 
             let a = int accept.[state] 
             if a <> sentinel then 
@@ -251,14 +250,14 @@ namespace Internal.Utilities.Text.Lexing
                 let inp = lexBuffer.Buffer.[lexBuffer.BufferScanPos]
                 
                 // Find the new state
-                let snew = lookupUnicodeCharacters (state,inp)
+                let snew = lookupUnicodeCharacters state inp
 
                 if snew = sentinel then 
                     lexBuffer.EndOfScan()
                 else 
                     lexBuffer.BufferScanLength <- lexBuffer.BufferScanLength + 1;
                     //printf "state %d --> %d on '%c' (%d)\n" s snew (char inp) inp;
-                    scanUntilSentinel(lexBuffer,snew)
+                    scanUntilSentinel lexBuffer snew
                           
         // Each row for the Unicode table has format 
         //      128 entries for ASCII characters
@@ -268,6 +267,6 @@ namespace Internal.Utilities.Text.Lexing
 
         member tables.Interpret(initialState,lexBuffer : LexBuffer<char>) = 
             startInterpret(lexBuffer)
-            scanUntilSentinel(lexBuffer, initialState)
+            scanUntilSentinel lexBuffer initialState
 
         static member Create(trans,accept) = new UnicodeTables(trans,accept)

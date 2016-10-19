@@ -12,6 +12,7 @@ open Microsoft.FSharp.Compiler.Tastops
 open Microsoft.FSharp.Compiler.Lib
 open Microsoft.FSharp.Compiler.AbstractIL
 open Microsoft.FSharp.Compiler.AbstractIL.IL
+open Microsoft.FSharp.Compiler.AbstractIL.Diagnostics 
 open Microsoft.FSharp.Compiler.AbstractIL.Internal
 open Microsoft.FSharp.Compiler.AbstractIL.Internal.Library 
 open Microsoft.FSharp.Compiler.CompileOps
@@ -1063,8 +1064,6 @@ module IncrementalBuilderEventTesting =
 
 module Tc = Microsoft.FSharp.Compiler.TypeChecker
 
-open Microsoft.FSharp.Compiler.AbstractIL.Diagnostics 
-open Internal.Utilities.Debug
 
 /// Accumulated results of type checking.
 [<NoEquality; NoComparison>]
@@ -1082,7 +1081,7 @@ type TypeCheckAccumulator =
 
       
 /// Global service state
-type FrameworkImportsCacheKey = (*resolvedpath*)string list * string * (*ClrRoot*)string list* (*fsharpBinaries*)string
+type FrameworkImportsCacheKey = (*resolvedpath*)string list * string * (*TargetFrameworkDirectories*)string list* (*fsharpBinaries*)string
 
 type FrameworkImportsCache(keepStrongly) = 
     let frameworkTcImportsCache = AgedLookup<FrameworkImportsCacheKey,(TcGlobals * TcImports)>(keepStrongly, areSame=(fun (x,y) -> x = y)) 
@@ -1097,6 +1096,7 @@ type FrameworkImportsCache(keepStrongly) =
             frameworkDLLs 
             |> List.map (fun ar->ar.resolvedPath) // The cache key. Just the minimal data.
             |> List.sort  // Sort to promote cache hits.
+
         let tcGlobals,frameworkTcImports = 
             // Prepare the frameworkTcImportsCache
             //
@@ -1105,7 +1105,7 @@ type FrameworkImportsCache(keepStrongly) =
             // FSharp.Core.dll and mscorlib.dll) must be logically invariant of all the other compiler configuration parameters.
             let key = (frameworkDLLsKey,
                         tcConfig.primaryAssembly.Name, 
-                        tcConfig.ClrRoot,
+                        tcConfig.TargetFrameworkDirectories,
                         tcConfig.fsharpBinariesDir)
             match frameworkTcImportsCache.TryGet key with 
             | Some res -> res
@@ -1262,8 +1262,8 @@ type IncrementalBuilder(frameworkTcImportsCache: FrameworkImportsCache, tcConfig
 
     // Mark up the source files with an indicator flag indicating if they are the last source file in the project
     let sourceFiles = 
-        let flags = tcConfig.ComputeCanContainEntryPoint(sourceFiles |> List.map snd)
-        (sourceFiles,flags) ||> List.map2 (fun (m,nm) flag -> (m,nm,flag))
+        let flags, isExe = tcConfig.ComputeCanContainEntryPoint(sourceFiles |> List.map snd)
+        ((sourceFiles,flags) ||> List.map2 (fun (m,nm) flag -> (m,nm,(flag, isExe))))
 
     // Get the names and time stamps of all the non-framework referenced assemblies, which will act 
     // as inputs to one of the nodes in the build. 
@@ -1318,7 +1318,7 @@ type IncrementalBuilder(frameworkTcImportsCache: FrameworkImportsCache, tcConfig
     /// This is a build task function that gets placed into the build rules as the computation for a VectorStamp
     ///
     /// Get the timestamp of the given file name.
-    let StampFileNameTask (_m:range, filename:string, _isLastCompiland:bool) =
+    let StampFileNameTask (_m:range, filename:string, _isLastCompiland) =
         assertNotDisposed()
         FileSystem.GetLastWriteTimeShim(filename)
                             
@@ -1564,7 +1564,7 @@ type IncrementalBuilder(frameworkTcImportsCache: FrameworkImportsCache, tcConfig
     // START OF BUILD DESCRIPTION
 
     // Inputs
-    let fileNamesNode               = InputVector<range*string*bool> "FileNames"
+    let fileNamesNode               = InputVector<range*string*(bool*bool)> "FileNames"
     let referencedAssembliesNode    = InputVector<Choice<string,IProjectReference>*DateTime> "ReferencedAssemblies"
         
     // Build
@@ -1721,7 +1721,7 @@ type IncrementalBuilder(frameworkTcImportsCache: FrameworkImportsCache, tcConfig
                    System.String.Compare(f1,f2,StringComparison.CurrentCultureIgnoreCase)=0
                 || System.String.Compare(FileSystem.GetFullPathShim(f1),FileSystem.GetFullPathShim(f2),StringComparison.CurrentCultureIgnoreCase)=0
             result
-        match TryGetSlotByInput(fileNamesNode,(rangeStartup,filename,false),partialBuild,CompareFileNames) with
+        match TryGetSlotByInput(fileNamesNode,(rangeStartup,filename,(false,false)),partialBuild,CompareFileNames) with
         | Some slot -> slot
         | None -> failwith (sprintf "The file '%s' was not part of the project. Did you call InvalidateConfiguration when the list of files in the project changed?" filename)
         
@@ -1745,7 +1745,7 @@ type IncrementalBuilder(frameworkTcImportsCache: FrameworkImportsCache, tcConfig
 
     /// CreateIncrementalBuilder (for background type checking). Note that fsc.fs also
     /// creates an incremental builder used by the command line compiler.
-    static member TryCreateBackgroundBuilderForProjectOptions (frameworkTcImportsCache, scriptClosureOptions:LoadClosure option, sourceFiles:string list, commandLineArgs:string list, projectReferences, projectDirectory, useScriptResolutionRules, isIncompleteTypeCheckEnvironment, keepAssemblyContents, keepAllBackgroundResolutions) =
+    static member TryCreateBackgroundBuilderForProjectOptions (referenceResolver, frameworkTcImportsCache, scriptClosureOptions:LoadClosure option, sourceFiles:string list, commandLineArgs:string list, projectReferences, projectDirectory, useScriptResolutionRules, isIncompleteTypeCheckEnvironment, keepAssemblyContents, keepAllBackgroundResolutions) =
     
         // Trap and report warnings and errors from creation.
         use errorScope = new ErrorScope()
@@ -1762,15 +1762,15 @@ type IncrementalBuilder(frameworkTcImportsCache: FrameworkImportsCache, tcConfig
                     
                 // see also fsc.fs:runFromCommandLineToImportingAssemblies(), as there are many similarities to where the PS creates a tcConfigB
                 let tcConfigB = 
-                    TcConfigBuilder.CreateNew(defaultFSharpBinariesDir, implicitIncludeDir=projectDirectory, 
+                    TcConfigBuilder.CreateNew(referenceResolver, defaultFSharpBinariesDir, implicitIncludeDir=projectDirectory, 
                                                 optimizeForMemory=true, isInteractive=false, isInvalidationSupported=true) 
                 // The following uses more memory but means we don'T take read-exclusions on the DLLs we reference 
                 // Could detect well-known assemblies--ie System.dll--and open them with read-locks 
                 tcConfigB.openBinariesInMemory <- true
                 tcConfigB.resolutionEnvironment 
                     <- if useScriptResolutionRules 
-                        then MSBuildResolver.DesigntimeLike  
-                        else MSBuildResolver.CompileTimeLike
+                        then ReferenceResolver.DesignTimeLike  
+                        else ReferenceResolver.CompileTimeLike
                 
                 tcConfigB.conditionalCompilationDefines <- 
                     let define = if useScriptResolutionRules then "INTERACTIVE" else "COMPILED"

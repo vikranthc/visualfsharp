@@ -25,8 +25,8 @@ open System.Reflection
 #if !FX_NO_WINFORMS
 open System.Windows.Forms
 #endif
-open Microsoft.FSharp.Compiler
 open Microsoft.FSharp.Compiler.AbstractIL
+open Microsoft.FSharp.Compiler.AbstractIL.Diagnostics
 open Microsoft.FSharp.Compiler.AbstractIL.IL
 open Microsoft.FSharp.Compiler.AbstractIL.Internal
 open Microsoft.FSharp.Compiler.AbstractIL.Internal.Library
@@ -34,24 +34,26 @@ open Microsoft.FSharp.Compiler.AbstractIL.Extensions.ILX
 open Microsoft.FSharp.Compiler.AbstractIL.ILRuntimeWriter 
 open Microsoft.FSharp.Compiler.Interactive.Settings
 open Microsoft.FSharp.Compiler.Interactive.RuntimeHelpers
-open Microsoft.FSharp.Compiler.Lib
-open Microsoft.FSharp.Compiler.CompileOptions
-open Microsoft.FSharp.Compiler.AbstractIL.Diagnostics
-open Microsoft.FSharp.Compiler.AbstractIL.IL
-open Microsoft.FSharp.Compiler.IlxGen
-open Microsoft.FSharp.Compiler.Range
+
+open Microsoft.FSharp.Compiler
+open Microsoft.FSharp.Compiler.AccessibilityLogic
 open Microsoft.FSharp.Compiler.Ast
-open Microsoft.FSharp.Compiler.ErrorLogger
-open Microsoft.FSharp.Compiler.TypeChecker
-open Microsoft.FSharp.Compiler.Tast
-open Microsoft.FSharp.Compiler.Infos
-open Microsoft.FSharp.Compiler.Tastops
-open Microsoft.FSharp.Compiler.Optimizer
-open Microsoft.FSharp.Compiler.TcGlobals
+open Microsoft.FSharp.Compiler.CompileOptions
 open Microsoft.FSharp.Compiler.CompileOps
+open Microsoft.FSharp.Compiler.ErrorLogger
+open Microsoft.FSharp.Compiler.Infos
+open Microsoft.FSharp.Compiler.InfoReader
+open Microsoft.FSharp.Compiler.IlxGen
 open Microsoft.FSharp.Compiler.Lexhelp
 open Microsoft.FSharp.Compiler.Layout
+open Microsoft.FSharp.Compiler.Lib
+open Microsoft.FSharp.Compiler.Optimizer
 open Microsoft.FSharp.Compiler.PostTypeCheckSemanticChecks
+open Microsoft.FSharp.Compiler.Range
+open Microsoft.FSharp.Compiler.TypeChecker
+open Microsoft.FSharp.Compiler.Tast
+open Microsoft.FSharp.Compiler.Tastops
+open Microsoft.FSharp.Compiler.TcGlobals
 
 open Internal.Utilities.Collections
 open Internal.Utilities.StructuredFormat
@@ -712,7 +714,7 @@ type internal FsiConsoleInput(fsiOptions: FsiCommandLineOptions, inReader: TextR
           (new Thread(fun () -> 
               match consoleOpt with 
               | Some console when fsiOptions.EnableConsoleKeyProcessing && not fsiOptions.IsInteractiveServer ->
-                  if isNil fsiOptions.SourceFiles then 
+                  if List.isEmpty fsiOptions.SourceFiles then 
                       if !progress then fprintfn outWriter "first-line-reader-thread reading first line...";
                       firstLine <- Some(console.ReadLine()); 
                       if !progress then fprintfn outWriter "first-line-reader-thread got first line = %A..." firstLine;
@@ -766,7 +768,7 @@ let internal WithImplicitHome (tcConfigB, dir) f =
 /// A single instance of this object is created per interactive session.
 type internal FsiDynamicCompiler
                        (timeReporter : FsiTimeReporter, 
-                        tcConfigB, 
+                        tcConfigB: TcConfigBuilder, 
                         tcLockObject : obj, 
                         errorLogger: ErrorLoggerThatStopsOnFirstError, 
                         outWriter: TextWriter,
@@ -795,7 +797,7 @@ type internal FsiDynamicCompiler
     let infoReader = InfoReader(tcGlobals,tcImports.GetImportMap())    
 
     /// Add attributes 
-    let CreateModuleFragment (tcConfigB, assemblyName, codegenResults) =
+    let CreateModuleFragment (tcConfigB: TcConfigBuilder, assemblyName, codegenResults) =
         if !progress then fprintfn fsiConsoleOutput.Out "Creating main module...";
         let mainModule = mkILSimpleModule assemblyName (GetGeneratedILModuleName tcConfigB.target assemblyName) (tcConfigB.target = Dll) tcConfigB.subsystemVersion tcConfigB.useHighEntropyVA (mkILTypeDefs codegenResults.ilTypeDefs) None None 0x0 (mkILExportedTypes []) ""
         { mainModule 
@@ -818,7 +820,6 @@ type internal FsiDynamicCompiler
 #if DEBUG
         // Logging/debugging
         if tcConfig.printAst then
-            let (TAssembly(declaredImpls)) = declaredImpls
             for input in declaredImpls do 
                 fprintfn fsiConsoleOutput.Out "AST:" 
                 fprintfn fsiConsoleOutput.Out "%+A" input
@@ -833,11 +834,7 @@ type internal FsiDynamicCompiler
         errorLogger.AbortOnError();
             
         let fragName = textOfLid prefixPath 
-#if ENABLE_MONO_SUPPORT
         let codegenResults = GenerateIlxCode (IlReflectBackend, isInteractiveItExpr, runningOnMono, tcConfig, topCustomAttrs, optimizedImpls, fragName, true, ilxGenerator)
-#else
-        let codegenResults = GenerateIlxCode (IlReflectBackend, isInteractiveItExpr, false, tcConfig, topCustomAttrs, optimizedImpls, fragName, true, ilxGenerator)
-#endif
         errorLogger.AbortOnError();
 
         // Each input is like a small separately compiled extension to a single source file. 
@@ -854,13 +851,6 @@ type internal FsiDynamicCompiler
 
         errorLogger.AbortOnError();
             
-        ReportTime tcConfig "ILX -> IL (Unions)"; 
-        let ilxMainModule = EraseUnions.ConvModule ilGlobals ilxMainModule
-        ReportTime tcConfig "ILX -> IL (Funcs)"; 
-        let ilxMainModule = EraseClosures.ConvModule ilGlobals ilxMainModule 
-
-        errorLogger.AbortOnError();   
-              
         ReportTime tcConfig "Assembly refs Normalised"; 
         let mainmod3 = Morphs.morphILScopeRefsInILModuleMemoized ilGlobals (NormalizeAssemblyRefs tcImports) ilxMainModule
         errorLogger.AbortOnError();
@@ -919,7 +909,6 @@ type internal FsiDynamicCompiler
             // 'Open' the path for the fragment we just compiled for any future printing.
             let denv = denv.AddOpenPath (pathOfLid prefixPath) 
 
-            let (TAssembly(declaredImpls)) = declaredImpls
             for (TImplFile(_qname,_,mexpr,_,_)) in declaredImpls do
                 let responseL = NicePrint.layoutInferredSigOfModuleExpr false denv infoReader AccessibleFromSomewhere rangeStdin mexpr 
                 if not (Layout.isEmptyL responseL) then      
@@ -961,8 +950,8 @@ type internal FsiDynamicCompiler
         let i = nextFragmentId()
         let prefix = mkFragmentPath i
         let prefixPath = pathOfLid prefix
-        let impl = SynModuleOrNamespace(prefix,(* isModule: *) true,defs,PreXmlDoc.Empty,[],None,rangeStdin)
-        let input = ParsedInput.ImplFile(ParsedImplFileInput(filename,true, ComputeQualifiedNameOfFileFromUniquePath (rangeStdin,prefixPath),[],[],[impl],true (* isLastCompiland *) ))
+        let impl = SynModuleOrNamespace(prefix,(*isRec*)false, (* isModule: *) true,defs,PreXmlDoc.Empty,[],None,rangeStdin)
+        let input = ParsedInput.ImplFile(ParsedImplFileInput(filename,true, ComputeQualifiedNameOfFileFromUniquePath (rangeStdin,prefixPath),[],[],[impl],(true (* isLastCompiland *), false (* isExe *)) ))
         let istate,tcEnvAtEndOfLastInput = ProcessInputs (istate, [input], showTypes, true, isInteractiveItExpr, prefix)
         let tcState = istate.tcState 
         { istate with tcState = tcState.NextStateAfterIncrementalFragment(tcEnvAtEndOfLastInput) }
@@ -1070,6 +1059,8 @@ type internal FsiDynamicCompiler
               else fsiConsoleOutput.uprintnf " %s %s" (FSIstrings.SR.fsiLoadingFilesPrefixText()) sourceFile)
           fsiConsoleOutput.uprintfn "]"
 
+          closure.NoWarns |> Seq.map (fun (n,ms) -> ms |> Seq.map (fun m -> m,n)) |> Seq.concat |> Seq.iter tcConfigB.TurnWarningOff
+
           // Play errors and warnings from closures of the surface (root) script files.
           closure.RootErrors |> List.iter errorSink
           closure.RootWarnings |> List.iter warnSink
@@ -1080,13 +1071,13 @@ type internal FsiDynamicCompiler
               |> List.map (fun (filename, input)-> 
                     let parsedInput = 
                         match input with 
-                        | None -> ParseOneInputFile(tcConfig,lexResourceManager,["INTERACTIVE"],filename,true,errorLogger,(*retryLocked*)false)
+                        | None -> ParseOneInputFile(tcConfig,lexResourceManager,["INTERACTIVE"],filename,(true,false),errorLogger,(*retryLocked*)false)
                         | _-> input
                     filename, parsedInput)
               |> List.unzip
           
           errorLogger.AbortOnError();
-          if inputs |> List.exists isNone then failwith "parse error";
+          if inputs |> List.exists Option.isNone then failwith "parse error"
           let inputs = List.map Option.get inputs 
           let istate = List.fold2 fsiDynamicCompiler.ProcessMetaCommandsFromInputAsInteractiveCommands istate sourceFiles inputs
           fsiDynamicCompiler.EvalParsedSourceFiles (istate, inputs)
@@ -1101,7 +1092,7 @@ type internal FsiDynamicCompiler
 
         let tcState = GetInitialTcState (rangeStdin, ccuName, tcConfig, tcGlobals, tcImports, niceNameGen, tcEnv)
 
-        let ilxGenerator = CreateIlxAssemblyGenerator(tcConfig,tcImports,tcGlobals, (LightweightTcValForUsingInBuildMethodCall tcGlobals), tcState.Ccu )
+        let ilxGenerator = CreateIlxAssemblyGenerator (tcConfig, tcImports, tcGlobals, (LightweightTcValForUsingInBuildMethodCall tcGlobals), tcState.Ccu)
         {optEnv    = optEnv0
          emEnv     = emEnv
          tcGlobals = tcGlobals
@@ -1131,10 +1122,10 @@ type internal FsiIntellisenseProvider(tcGlobals, tcImports: TcImports) =
         let tcState = istate.tcState (* folded through now? *)
 
         let amap = tcImports.GetImportMap()
-        let infoReader = new Infos.InfoReader(tcGlobals,amap)
+        let infoReader = new InfoReader(tcGlobals,amap)
         let ncenv = new NameResolution.NameResolver(tcGlobals,amap,infoReader,NameResolution.FakeInstantiationGenerator)
         // Note: for the accessor domain we should use (AccessRightsOfEnv tcState.TcEnvFromImpls)
-        let ad = Infos.AccessibleFromSomeFSharpCode
+        let ad = AccessibleFromSomeFSharpCode
         let nItems = NameResolution.ResolvePartialLongIdent ncenv tcState.TcEnvFromImpls.NameEnv (ConstraintSolver.IsApplicableMethApprox tcGlobals amap rangeStdin) rangeStdin ad lid false
         let names  = nItems |> List.map (fun d -> d.DisplayName) 
         let names  = names |> List.filter (fun (name:string) -> name.StartsWith(stem,StringComparison.Ordinal)) 
@@ -1909,7 +1900,7 @@ type internal FsiInteractionProcessor
 
         let istate = consume istate fsiOptions.SourceFiles
 
-        if nonNil fsiOptions.SourceFiles then 
+        if not (List.isEmpty fsiOptions.SourceFiles) then 
             fsiConsolePrompt.PrintAhead(); // Seems required. I expected this could be deleted. Why not?
         istate 
 
@@ -2218,21 +2209,24 @@ type internal FsiEvaluationSession (argv:string[], inReader:TextReader, outWrite
          System.AppDomain.CurrentDomain.BaseDirectory
 #endif
 
+    let referenceResolver = MSBuildReferenceResolver.Resolver 
     let tcConfigB = 
-        TcConfigBuilder.CreateNew(defaultFSharpBinariesDir, 
-                                                    true, // long running: optimizeForMemory 
-                                                    Directory.GetCurrentDirectory(),isInteractive=true, 
-                                                    isInvalidationSupported=false)
+        TcConfigBuilder.CreateNew(referenceResolver,
+                                  defaultFSharpBinariesDir, 
+                                  true, // long running: optimizeForMemory 
+                                  Directory.GetCurrentDirectory(),isInteractive=true, 
+                                  isInvalidationSupported=false)
     let tcConfigP = TcConfigProvider.BasedOnMutableBuilder(tcConfigB)
-#if FX_MSBUILDRESOLVER_RUNTIMELIKE
-    do tcConfigB.resolutionEnvironment <- MSBuildResolver.RuntimeLike // See Bug 3608
+#if TODO_REWORK_ASSEMBLY_LOAD
+    // "RuntimeLike" assembly resolution for F# Interactive is not yet properly figured out on .NET Core
+    do tcConfigB.resolutionEnvironment <- ReferenceResolver.DesignTimeLike
 #else
-    do tcConfigB.resolutionEnvironment <- MSBuildResolver.DesigntimeLike
+    do tcConfigB.resolutionEnvironment <- ReferenceResolver.RuntimeLike // See Bug 3608
 #endif
     do tcConfigB.useFsiAuxLib <- true
 
 #if TODO_REWORK_ASSEMBLY_LOAD
-    do tcConfigB.useMonoResolution<-true
+    do tcConfigB.useSimpleResolution<-true
 #else
 #endif
 
@@ -2253,7 +2247,7 @@ type internal FsiEvaluationSession (argv:string[], inReader:TextReader, outWrite
     do InstallErrorLoggingOnThisThread errorLogger // FSI error logging on main thread.
 
     let updateBannerText() =
-      tcConfigB.productNameForBannerText <- FSIstrings.SR.fsiProductName(FSharpEnvironment.DotNetBuildString)
+      tcConfigB.productNameForBannerText <- FSIstrings.SR.fsiProductName(FSharpEnvironment.FSharpBannerVersion)
   
     do updateBannerText() // setting the correct banner so that 'fsi -?' display the right thing
 
@@ -2291,7 +2285,7 @@ type internal FsiEvaluationSession (argv:string[], inReader:TextReader, outWrite
     do fsiConsoleOutput.uprintfn ""
 
     // When no source files to load, print ahead prompt here 
-    do if isNil  fsiOptions.SourceFiles then 
+    do if List.isEmpty fsiOptions.SourceFiles then 
         fsiConsolePrompt.PrintAhead()       
 
 

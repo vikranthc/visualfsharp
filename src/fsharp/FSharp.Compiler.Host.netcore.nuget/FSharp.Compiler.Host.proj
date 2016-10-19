@@ -11,6 +11,8 @@
     <OutDir>$(FSharpSourcesRoot)\..\$(Configuration)\$(TargetFramework)\bin</OutDir>
   </PropertyGroup>
 
+  <!-- TODO: Switch to using lkg coreclr fsi and remove dependency on running FSharp.Compiler.Tools fsi -->
+  
   <Target Name="Build" Outputs="$(TargetPath)"  DependsOnTargets="$(BuildDependsOn)">
     <Exec Command="$(FsiToolPath)\$(FsiToolExe) --exec layoutfschostnuget.fsx --nuspec:.\Microsoft.FSharp.Compiler.Host.netcore.nuspec --bindir:$(OutDir)"/>
     <Exec Command="$(FsiToolPath)\$(FsiToolExe) --exec ..\..\buildtools\buildnugets.fsx --version:$(pkgversion) --nuspec:.\Microsoft.FSharp.Compiler.Host.netcore.nuspec --bindir:$(OutDir)"/>

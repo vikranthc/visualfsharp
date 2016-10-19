@@ -7,20 +7,6 @@ module internal Microsoft.FSharp.Compiler.AbstractIL.IL
 open Internal.Utilities
 open System.Collections.Generic
 
-/// The type used to store relatively small lists in the Abstract IL data structures, i.e. for ILTypes, ILGenericArgs, ILParameters and ILLocals.
-/// See comments in il.fs for why we've isolated this representation and the possible future choices we might use here.
-#if ABSIL_USES_ARRAY_FOR_ILLIST
-type ILList<'T> = 'T []
-#endif
-
-#if ABSIL_USES_THREELIST_FOR_ILLIST
-type ILList<'T> = ThreeList<'T>
-#endif
-
-//#if ABSIL_USES_LIST_FOR_ILLIST
-type ILList<'T> = 'T list
-//#endif
-
 type PrimaryAssembly = 
     | Mscorlib
     | DotNetCore
@@ -97,18 +83,6 @@ type ILSourceMarker =
     member Column: int
     member EndLine: int
     member EndColumn: int
-
-/// Extensibility: ignore these unless you are generating ILX
-/// structures directly.
-[<Sealed>]
-type IlxExtensionType  =
-    interface System.IComparable
-
-/// Represents an extension to the algebra of type kinds
-type IlxExtensionTypeKind 
-
-/// Represents an extension to the algebra of instructions
-type IlxExtensionInstr 
 
 [<StructuralEquality; StructuralComparison>]
 type PublicKey = 
@@ -373,28 +347,8 @@ and [<StructuralEquality; StructuralComparison>]
 /// Actual generic parameters are  always types.  
 
 
-and ILGenericArgs = ILList<ILType>
-and ILTypes = ILList<ILType>
-
-
-[<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
-module ILList = 
-    val inline map : ('T -> 'U) -> ILList<'T> -> ILList<'U>
-    val inline mapi : (int -> 'T -> 'U) -> ILList<'T> -> ILList<'U>
-    val inline isEmpty : ILList<'T> -> bool
-    val inline toList : ILList<'T> -> 'T list
-    val inline ofList : 'T list -> ILList<'T> 
-    val inline lengthsEqAndForall2 : ('T -> 'U -> bool) -> ILList<'T> -> ILList<'U> -> bool
-    val inline init : int -> (int -> 'T) -> ILList<'T>
-    val inline empty<'T> : ILList<'T>
-    val inline toArray : ILList<'T> -> 'T[]
-    val inline ofArray : 'T[] -> ILList<'T>
-    val inline nth : ILList<'T> -> int -> 'T
-    val inline iter : ('T -> unit) -> ILList<'T> -> unit
-    val inline iteri : (int -> 'T -> unit) -> ILList<'T> -> unit
-    val inline foldBack : ('T -> 'State -> 'State) -> ILList<'T> -> 'State -> 'State
-    val inline exists : ('T -> bool) -> ILList<'T> -> bool
-
+and ILGenericArgs = list<ILType>
+and ILTypes = list<ILType>
 
 /// Formal identities of methods.  Method refs refer to methods on 
 /// named types.  In general you should work with ILMethodSpec objects
@@ -589,8 +543,8 @@ type ILInstr =
     // Control transfer 
     | I_br    of  ILCodeLabel
     | I_jmp   of ILMethodSpec
-    | I_brcmp of ILComparisonInstr * ILCodeLabel * ILCodeLabel // second label is fall-through 
-    | I_switch    of (ILCodeLabel list * ILCodeLabel) // last label is fallthrough 
+    | I_brcmp of ILComparisonInstr * ILCodeLabel 
+    | I_switch    of ILCodeLabel list 
     | I_ret 
 
      // Method call 
@@ -678,185 +632,39 @@ type ILInstr =
     // EXTENSIONS, e.g. MS-ILX 
     | EI_ilzero of ILType
     | EI_ldlen_multi      of int32 * int32
-    | I_other    of IlxExtensionInstr
 
-// REVIEW: remove this open-ended way of extending the IL and just combine with ILX
-type ILInstrSetExtension<'Extension> = 
-    { instrExtDests: ('Extension -> ILCodeLabel list);
-      instrExtFallthrough: ('Extension -> ILCodeLabel option);
-      instrExtIsTailcall: ('Extension -> bool);
-      instrExtRelabel: (ILCodeLabel -> ILCodeLabel) -> 'Extension -> 'Extension; }
 
-val RegisterInstructionSetExtension: ILInstrSetExtension<'Extension> -> ('Extension -> IlxExtensionInstr) * (IlxExtensionInstr -> bool) * (IlxExtensionInstr -> 'Extension)
+[<RequireQualifiedAccess>]
+type ILExceptionClause = 
+    | Finally of (ILCodeLabel * ILCodeLabel)
+    | Fault  of (ILCodeLabel * ILCodeLabel)
+    | FilterCatch of (ILCodeLabel * ILCodeLabel) * (ILCodeLabel * ILCodeLabel)
+    | TypeCatch of ILType * (ILCodeLabel * ILCodeLabel)
 
-/// A list of instructions ending in an unconditionally
-/// branching instruction. A basic block has a label which must be unique
-/// within the method it is located in.  Only the first instruction of
-/// a basic block can be the target of a branch.
-//
-//   Details: The last instruction is always a control flow instruction,
-//   i.e. branch, tailcall, throw etc.
-// 
-//   For example
-//       B1:  ldarg 1
-//            pop
-//            ret
-//
-//   will be one basic block:
-//       ILBasicBlock("B1", [| I_ldarg(1); I_arith(AI_pop); I_ret |])
-
-type ILBasicBlock = 
-    { Label: ILCodeLabel;
-      Instructions: ILInstr[] }
-    member Fallthrough: ILCodeLabel option
-
+[<RequireQualifiedAccess; NoEquality; NoComparison>]
+type ILExceptionSpec = 
+    { Range: (ILCodeLabel * ILCodeLabel);
+      Clause: ILExceptionClause }
 
 /// Indicates that a particular local variable has a particular source 
-/// language name within a GroupBlock. This does not effect local 
+/// language name within a given set of ranges. This does not effect local 
 /// variable numbering, which is global over the whole method. 
-type ILDebugMapping =
+[<RequireQualifiedAccess; NoEquality; NoComparison>]
+type ILLocalDebugMapping =
     { LocalIndex: int;
       LocalName: string; }
 
-/// ILCode
-/// 
-/// The code for a method is made up of a "code" object.  Each "code"
-/// object gives the contents of the method in a "semi-structured" form, i.e.
-///   1. The structure implicit in the IL exception handling tables
-///      has been made explicit
-///   2. No relative offsets are used in the code: all branches and
-///      switch targets are made explicit as labels.
-///   3. All "fallthroughs" from one basic block to the next have
-///      been made explicit, by adding extra "branch" instructions to
-///      the end of basic blocks which simply fallthrough to another basic
-///      block.
-///
-/// You can convert a straight-line sequence of instructions to structured
-/// code by using buildILCode and 
-/// Most of the interesting code is contained in BasicBlocks. If you're
-/// just interested in getting started with the format then begin
-/// by simply considering methods which do not contain any branch 
-/// instructions, or methods which do not contain any exception handling
-/// constructs.
-///
-/// The above format has the great advantage that you can insert and 
-/// delete new code blocks without needing to fixup relative offsets
-/// or exception tables.  
-///
-/// ILBasicBlock(bblock)
-///   See above
-///
-/// GroupBlock(localDebugInfo, blocks)
-///   A set of blocks, with interior branching between the blocks.  For example
-///       B1:  ldarg 1
-///            br B2
-///
-///       B2:  pop
-///            ret
-///
-///   will be two basic blocks
-///       let b1 = ILBasicBlock("B1", [| I_ldarg(1); I_br("B2") |])
-///       let b2 = ILBasicBlock("B2", [| I_arith(AI_pop); I_ret |])
-///       GroupBlock([], [b1; b2])
-///
-///   A GroupBlock can include a list of debug info records for locally 
-///   scoped local variables.  These indicate that within the given blocks
-///   the given local variables are used for the given Debug info 
-///   will only be recorded for local variables
-///   declared in these nodes, and the local variable will only appear live 
-///   in the debugger for the instructions covered by this node. So if you 
-///   omit or erase these nodes then no debug info will be emitted for local 
-///   variables.  If necessary you can have one outer ScopeBlock which specifies 
-///   the information for all the local variables 
-///  
-///   Not all the destination labels used within a group of blocks need
-///   be satisfied by that group alone.  For example, the interior "try" code
-///   of "try"-"catch" construct may be:
-///       B1:  ldarg 1
-///            br B2
-///
-///       B2:  pop
-///            leave B3
-///
-///   Again there will be two basic blocks grouped together:
-///       let b1 = ILBasicBlock("B1", [| I_ldarg(1); I_br("B2") |])
-///       let b2 = ILBasicBlock("B2", [| I_arith(AI_pop); I_leave("B3") |])
-///       GroupBlock([], [b1; b2])
-///   Here the code must be embedded in a method where "B3" is a label 
-///   somewhere in the method.
-///
-/// RestrictBlock(labels,code) 
-///   This block hides labels, i.e. the given set of labels represent
-///   wiring which is purely internal to the given code block, and may not
-///   be used as the target of a branch by any blocks which this block
-///   is placed alongside.
-///
-///   For example, if a method is made up of:
-///       B1:  ldarg 1
-///            br B2
-///
-///       B2:  ret
-///
-///   then the label "B2" is internal.  The overall code will
-///   be two basic blocks grouped together, surrounded by a RestrictBlock.
-///   The label "B1" is then the only remaining visible entry to the method
-///   and execution will begin at that label.
-///
-///       let b1 = ILBasicBlock("B1", [| I_ldarg(1); I_br("B2") |])
-///       let b2 = ILBasicBlock("B2", [| I_arith(AI_pop); I_leave("B3") |])
-///       let gb1 = GroupBlock([], [b1; b2])
-///       RestrictBlock(["B2"], gb1)
-///
-///   RestrictBlock is necessary to build well-formed code.  
-///
-/// TryBlock(trycode,seh)
-///
-///   A try-catch, try-finally or try-fault block.  
-///   If an exception is raised while executing
-///   an instruction in 'trycode' then the exception handler given by
-///   'seh' is executed.
-///
-/// Well-formedness conditions for code:
-///
-///   Well-formed code includes nodes which explicitly "hide" interior labels.
-///   For example, the code object for a method may have only one entry
-///   label which is not hidden, and this label will be the label where 
-///   execution begins.  
-///
-///   Both filter and catch blocks must have one 
-///   and only one entry.  These entry labels are not visible 
-///   outside the filter and catch blocks. Filter has no 
-///   exits (it always uses endfilter), catch may have exits. 
-///   The "try" block can have multiple entries, i.e. you can branch 
-///   into a try from outside.  They can have multiple exits, each of 
-///   which will be a "leave".
-///
+[<RequireQualifiedAccess; NoEquality; NoComparison>]
+type ILLocalDebugInfo = 
+    { Range: (ILCodeLabel * ILCodeLabel);
+      DebugMappings: ILLocalDebugMapping list }
+
+[<RequireQualifiedAccess; NoEquality; NoComparison>]
 type ILCode = 
-    | ILBasicBlock of ILBasicBlock
-    | GroupBlock of ILDebugMapping list * ILCode list
-    | RestrictBlock of ILCodeLabel list * ILCode
-    | TryBlock of ILCode * ILExceptionBlock
-
-///   The 'seh' specification can have several forms:
-///
-///     FilterCatchBlock
-///       A multi-try-filter-catch block.  Execute the
-///       filters in order to determine which 'catch' block to catch the
-///       exception with. There are two kinds of filters - one for 
-///       filtering exceptions by type and one by an instruction sequence. 
-///       Note that filter blocks can't contain any exception blocks. 
-///
-and ILExceptionBlock = 
-    | FaultBlock of ILCode 
-    | FinallyBlock of ILCode
-    | FilterCatchBlock of (ILFilterBlock * ILCode) list
-
-and ILFilterBlock = 
-    | TypeFilter of ILType
-    | CodeFilter of ILCode
-
-val labelsOfCode: ILCode -> ILCodeLabel list
-val uniqueEntryOfCode: ILCode -> ILCodeLabel
+    { Labels: Dictionary<ILCodeLabel,int> 
+      Instrs:ILInstr[] 
+      Exceptions: ILExceptionSpec list 
+      Locals: ILLocalDebugInfo list }
 
 /// Field Init
 
@@ -877,7 +685,7 @@ type ILFieldInit =
     | Double of double
     | Null
 
-[<RequireQualifiedAccess>]
+[<RequireQualifiedAccess; StructuralEquality; StructuralComparison>]
 type ILNativeVariant = 
     | Empty
     | Null
@@ -969,17 +777,16 @@ type ILNativeType =
 
 
 /// Local variables
-[<NoComparison; NoEquality>]
+[<RequireQualifiedAccess; NoComparison; NoEquality>]
 type ILLocal = 
     { Type: ILType;
       IsPinned: bool;
       DebugInfo: (string * int * int) option }
      
-
-type ILLocals = ILList<ILLocal>
+type ILLocals = list<ILLocal>
 
 /// IL method bodies
-[<NoComparison; NoEquality>]
+[<RequireQualifiedAccess; NoComparison; NoEquality>]
 type ILMethodBody = 
     { IsZeroInit: bool;
       /// strictly speakin should be a uint16 
@@ -1037,6 +844,7 @@ type ILAttributes =
 
 /// Method parameters and return values.
 
+[<RequireQualifiedAccess; NoEquality; NoComparison>]
 type ILParameter = 
     { Name: string option;
       Type: ILType;
@@ -1048,12 +856,12 @@ type ILParameter =
       IsOptional: bool;
       CustomAttrs: ILAttributes }
 
-type ILParameters = ILList<ILParameter>
+type ILParameters = list<ILParameter>
 
-val typesOfILParamsRaw : ILParameters -> ILTypes
-val typesOfILParamsList : ILParameter list -> ILType list
+val typesOfILParams : ILParameters -> ILType list
 
 /// Method return values.
+[<RequireQualifiedAccess; NoEquality; NoComparison>]
 type ILReturn = 
     { Marshal: ILNativeType option;
       Type: ILType; 
@@ -1120,7 +928,7 @@ type PInvokeThrowOnUnmappableChar =
     | Enabled
     | Disabled
 
-[<NoComparison; NoEquality>]
+[<RequireQualifiedAccess; NoComparison; NoEquality>]
 type PInvokeMethod =
     { Where: ILModuleRef;
       Name: string;
@@ -1409,8 +1217,6 @@ type ILTypeDefKind =
     | Interface
     | Enum 
     | Delegate 
-    (* FOR EXTENSIONS, e.g. MS-ILX *)  
-    | Other of IlxExtensionTypeKind
 
 /// Tables of named type definitions.  The types and table may contain on-demand
 /// (lazy) computations, e.g. the actual reading of some aspects
@@ -1586,6 +1392,7 @@ type ILAssemblyManifest =
       AssemblyLongevity: ILAssemblyLongevity; 
       DisableJitOptimizations: bool;
       JitTracking: bool;
+      IgnoreSymbolStoreSequencePoints: bool;
       Retargetable: bool;
       /// Records the types impemented by this asssembly in auxiliary 
       /// modules. 
@@ -1782,7 +1589,7 @@ type ILGlobals =
       with
       member mkDebuggableAttribute: bool (* disable JIT optimizations *) -> ILAttribute
       /// Some commonly used custom attibutes
-      member mkDebuggableAttributeV2               : bool (* ignoreSymbolStoreSequencePoints *) * bool (* disable JIT optimizations *) * bool (* enable EnC *) -> ILAttribute
+      member mkDebuggableAttributeV2               : bool (* jitTracking *) * bool (* ignoreSymbolStoreSequencePoints *) * bool (* disable JIT optimizations *) * bool (* enable EnC *) -> ILAttribute
       member mkCompilerGeneratedAttribute          : unit -> ILAttribute
       member mkDebuggerNonUserCodeAttribute        : unit -> ILAttribute
       member mkDebuggerStepThroughAttribute        : unit -> ILAttribute
@@ -1816,7 +1623,6 @@ val decodeILAttribData:
 val mkSimpleAssRef: string -> ILAssemblyRef
 val mkSimpleModRef: string -> ILModuleRef
 
-val emptyILGenericArgs: ILGenericArgs
 val mkILTyvarTy: uint16 -> ILType
 
 /// Make type refs.
@@ -1825,17 +1631,15 @@ val mkILTyRef: ILScopeRef * string -> ILTypeRef
 val mkILTyRefInTyRef: ILTypeRef * string -> ILTypeRef
 
 type ILGenericArgsList = ILType list
-val mkILGenericArgs : ILGenericArgsList -> ILGenericArgs
+
 /// Make type specs.
 val mkILNonGenericTySpec: ILTypeRef -> ILTypeSpec
 val mkILTySpec: ILTypeRef * ILGenericArgsList -> ILTypeSpec
-val mkILTySpecRaw: ILTypeRef * ILGenericArgs -> ILTypeSpec
 
 /// Make types.
 val mkILTy: ILBoxity -> ILTypeSpec -> ILType
 val mkILNamedTy: ILBoxity -> ILTypeRef -> ILGenericArgsList -> ILType
 val mkILBoxedTy: ILTypeRef -> ILGenericArgsList -> ILType
-val mkILBoxedTyRaw: ILTypeRef -> ILGenericArgs -> ILType
 val mkILValueTy: ILTypeRef -> ILGenericArgsList -> ILType
 val mkILNonGenericBoxedTy: ILTypeRef -> ILType
 val mkILNonGenericValueTy: ILTypeRef -> ILType
@@ -1845,16 +1649,11 @@ val isILArrTy: ILType -> bool
 val destILArrTy: ILType -> ILArrayShape * ILType 
 val mkILBoxedType : ILTypeSpec -> ILType
 
-val mkILTypes : ILType list -> ILTypes
-
 /// Make method references and specs.
-val mkILMethRefRaw: ILTypeRef * ILCallingConv * string * int * ILTypes * ILType -> ILMethodRef
 val mkILMethRef: ILTypeRef * ILCallingConv * string * int * ILType list * ILType -> ILMethodRef
 val mkILMethSpec: ILMethodRef * ILBoxity * ILGenericArgsList * ILGenericArgsList -> ILMethodSpec
-val mkILMethSpecForMethRefInTyRaw: ILMethodRef * ILType * ILGenericArgs -> ILMethodSpec
 val mkILMethSpecForMethRefInTy: ILMethodRef * ILType * ILGenericArgsList -> ILMethodSpec
 val mkILMethSpecInTy: ILType * ILCallingConv * string * ILType list * ILType * ILGenericArgsList -> ILMethodSpec
-val mkILMethSpecInTyRaw: ILType * ILCallingConv * string * ILTypes * ILType * ILGenericArgs -> ILMethodSpec
 
 /// Construct references to methods on a given type .
 val mkILNonGenericMethSpecInTy: ILType * ILCallingConv * string * ILType list * ILType -> ILMethodSpec
@@ -1879,16 +1678,14 @@ val mkILFieldRef: ILTypeRef * string * ILType -> ILFieldRef
 val mkILFieldSpec: ILFieldRef * ILType -> ILFieldSpec
 val mkILFieldSpecInTy: ILType * string * ILType -> ILFieldSpec
 
-val mkILCallSigRaw: ILCallingConv * ILTypes * ILType -> ILCallingSignature
 val mkILCallSig: ILCallingConv * ILType list * ILType -> ILCallingSignature
 
 /// Make generalized verions of possibly-generic types,
 /// e.g. Given the ILTypeDef for List, return the type "List<T>".
 val mkILFormalBoxedTy: ILTypeRef -> ILGenericParameterDef list -> ILType
+val mkILFormalNamedTy: ILBoxity -> ILTypeRef -> ILGenericParameterDef list -> ILType
 
-val mkILFormalTyparsRaw: ILTypes -> ILGenericParameterDefs
 val mkILFormalTypars: ILType list -> ILGenericParameterDefs
-val mkILFormalGenericArgsRaw: ILGenericParameterDefs -> ILGenericArgs
 val mkILFormalGenericArgs: ILGenericParameterDefs -> ILGenericArgsList
 val mkILSimpleTypar : string -> ILGenericParameterDef
 /// Make custom attributes.
@@ -1909,25 +1706,12 @@ val mkILCustomAttribute:
 val mkPermissionSet : ILGlobals -> ILSecurityAction * (ILTypeRef * (string * ILType * ILAttribElem) list) list -> ILPermission
 
 /// Making code.
-val checkILCode:  ILCode -> ILCode
 val generateCodeLabel: unit -> ILCodeLabel
 val formatCodeLabel : ILCodeLabel -> string
 
 /// Make some code that is a straight line sequence of instructions. 
 /// The function will add a "return" if the last instruction is not an exiting instruction.
 val nonBranchingInstrsToCode: ILInstr list -> ILCode 
-
-/// Make some code that is a straight line sequence of instructions, then do 
-/// some control flow.  The first code label is the entry label of the generated code. 
-val mkNonBranchingInstrsThen: ILCodeLabel -> ILInstr list -> ILInstr -> ILCode 
-val mkNonBranchingInstrsThenBr: ILCodeLabel -> ILInstr list -> ILCodeLabel -> ILCode
-
-/// Make a basic block. The final instruction must be control flow.
-val mkNonBranchingInstrs: ILCodeLabel -> ILInstr list -> ILCode
-
-/// Some more primitive helpers.
-val mkBasicBlock: ILBasicBlock -> ILCode
-val mkGroupBlock: ILCodeLabel list * ILCode list -> ILCode
 
 /// Helpers for codegen: scopes for allocating new temporary variables.
 type ILLocalsAllocator =
@@ -1963,8 +1747,6 @@ val mkILParamAnon: ILType -> ILParameter
 val mkILParamNamed: string * ILType -> ILParameter
 val mkILReturn: ILType -> ILReturn
 val mkILLocal: ILType -> (string * int * int) option -> ILLocal
-val mkILLocals : ILLocal list -> ILLocals
-val emptyILLocals : ILLocals
 
 /// Make a formal generic parameters.
 val mkILEmptyGenericParams: ILGenericParameterDefs
@@ -2147,20 +1929,6 @@ val rescopeILFieldRef: ILScopeRef -> ILFieldRef -> ILFieldRef
 // The ILCode Builder utility.
 //----------------------------------------------------------------------
 
-[<RequireQualifiedAccess>]
-type ILExceptionClause = 
-    | Finally of (ILCodeLabel * ILCodeLabel)
-    | Fault  of (ILCodeLabel * ILCodeLabel)
-    | FilterCatch of (ILCodeLabel * ILCodeLabel) * (ILCodeLabel * ILCodeLabel)
-    | TypeCatch of ILType * (ILCodeLabel * ILCodeLabel)
-
-type ILExceptionSpec = 
-    { exnRange: (ILCodeLabel * ILCodeLabel);
-      exnClauses: ILExceptionClause list }
-
-type ILLocalSpec = 
-    { locRange: (ILCodeLabel * ILCodeLabel);
-      locInfos: ILDebugMapping list }
 
 /// buildILCode: Build code from a sequence of instructions.
 /// 
@@ -2188,13 +1956,7 @@ type ILLocalSpec =
 /// The input can be badly formed in many ways: exception handlers might
 /// overlap, or scopes of local variables may overlap badly with 
 /// exception handlers.
-val buildILCode:
-    string ->
-    (ILCodeLabel -> int) -> 
-    ILInstr[] -> 
-    ILExceptionSpec list -> 
-    ILLocalSpec list -> 
-    ILCode
+val buildILCode: string -> lab2pc: Dictionary<ILCodeLabel,int> -> instrs:ILInstr[] -> ILExceptionSpec list -> ILLocalDebugInfo list -> ILCode
 
 // -------------------------------------------------------------------- 
 // The instantiation utilities.
@@ -2281,9 +2043,7 @@ type ILPropertyRef =
      member Name: string
      interface System.IComparable
 
-#if ENABLE_MONO_SUPPORT
 val runningOnMono: bool
-#endif
 
 type ILReferences = 
     { AssemblyReferences: ILAssemblyRef list; 
@@ -2293,9 +2053,3 @@ type ILReferences =
 val computeILRefs: ILModuleDef -> ILReferences
 val emptyILRefs: ILReferences
 
-// -------------------------------------------------------------------- 
-// The following functions are used to define an extension to the  In reality the only extension is ILX
-
-type ILTypeDefKindExtension<'Extension> = TypeDefKindExtension
-
-val RegisterTypeDefKindExtension: ILTypeDefKindExtension<'Extension> -> ('Extension -> IlxExtensionTypeKind) * (IlxExtensionTypeKind -> bool) * (IlxExtensionTypeKind -> 'Extension)
